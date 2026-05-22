@@ -31,7 +31,9 @@ CAS_LOGIN_PATH = "/authserver/login"
 CAS_CAPTCHA_CHECK = "/authserver/checkNeedCaptcha.htl"
 JWXT_BASE = "https://jwxt.bistu.edu.cn"
 JWXT_SERVICE = f"{JWXT_BASE}/jwapp/sys/emappagelog/modules/emappagelog/loginNew.do"
-HOMEAPP = f"{JWXT_BASE}/jwapp/sys/homeapp"
+CJZHCXAPP = f"{JWXT_BASE}/jwapp/sys/cjzhcxapp"
+CXWDCJ_URL = f"{CJZHCXAPP}/modules/wdcj/cxwdcj.do"        # 成绩列表
+DETAILS_URL = f"{CJZHCXAPP}/api/wdcj/details.do"          # 单门课分项成绩
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -182,6 +184,15 @@ class JwxtSession:
             if JWXT_BASE in r.url:
                 self._logged_in = True
                 log.info("CAS 登录成功")
+                # 注册 cjzhcxapp 应用上下文（不然 cxwdcj.do 会 403）
+                try:
+                    self.session.get(
+                        f"{CJZHCXAPP}/*default/index.do",
+                        params={"THEME": "indigo", "forceApp": "cjzhcxapp"},
+                        timeout=15,
+                    )
+                except Exception as e:
+                    log.warning(f"访问 cjzhcxapp 入口失败（可能不影响）: {e}")
                 return True
 
             if "showErrorTip" in r.text or "密码错误" in r.text:
@@ -207,42 +218,48 @@ class JwxtSession:
             raise SessionExpired(f"非 JSON 响应 ({ctype})")
         return r.json()
 
-    def fetch_terms(self) -> list[str]:
-        data = self._request_json(f"{HOMEAPP}/api/home/kb/xnxq.do")
-        items = data.get("datas", [])
-        return [it["itemCode"] for it in items if "itemCode" in it]
+    def _post_json(self, url: str, data: dict | None = None) -> dict:
+        """POST 版的 _request_json：检测会话失效。"""
+        r = self.session.post(url, data=data or {}, timeout=15, allow_redirects=False)
+        if r.status_code in (301, 302):
+            raise SessionExpired(f"被重定向到 {r.headers.get('Location', '?')}")
+        r.raise_for_status()
+        ctype = r.headers.get("Content-Type", "")
+        if "json" not in ctype.lower():
+            raise SessionExpired(f"非 JSON 响应 ({ctype})")
+        return r.json()
 
-    def fetch_grades_by_term(self, term_code: str) -> list[dict]:
-        data = self._request_json(
-            f"{HOMEAPP}/api/home/student/scores.do",
-            params={"termCode": term_code},
-        )
-        if data.get("code") == "0":
-            return data.get("datas") or []
-        return []
-
-    def fetch_all_grades(self, active_terms: list[str] | None = None) -> list[dict]:
+    def fetch_all_grades(self) -> list[dict]:
         """
-        遍历学期取成绩，附加 _termCode 字段。
-        active_terms: 已知有成绩的学期列表，优化用 —— 只查这些 + 最近两个学期。
+        一次性拉所有成绩（cjzhcxapp/wdcj/cxwdcj.do）。
+        把字段规范为 {_termCode, courseNo, courseName, score, credit, gradePoint, WID}。
         """
-        all_terms = self.fetch_terms()
-        if not all_terms:
+        data = self._post_json(CXWDCJ_URL, {"pageSize": "200", "pageNumber": "1"})
+        if data.get("code") != "0":
             return []
+        rows = ((data.get("datas") or {}).get("cxwdcj") or {}).get("rows") or []
+        out: list[dict] = []
+        for r in rows:
+            out.append({
+                "_termCode": r.get("XNXQDM", ""),
+                "courseNo": r.get("KCH", ""),
+                "courseName": r.get("KCM", "未知课程"),
+                "score": r.get("XSZCJ", ""),
+                "credit": r.get("XF", ""),
+                "gradePoint": r.get("JD", ""),
+                "WID": r.get("WID", ""),
+                "_hasItemScores": bool(r.get("FXCJ")),
+            })
+        return out
 
-        if active_terms:
-            # 只查"已知有数据"的 + 最新两个学期（覆盖新成绩出现的情况）
-            terms_to_query = list(dict.fromkeys(active_terms + all_terms[:2]))
-        else:
-            terms_to_query = all_terms
-
-        results: list[dict] = []
-        for term_code in terms_to_query:
-            grades = self.fetch_grades_by_term(term_code)
-            for g in grades:
-                g["_termCode"] = term_code
-            results.extend(grades)
-        return results
+    def fetch_grade_details(self, wid: str) -> dict:
+        """拉单门课的分项成绩 → 返回 details 子对象，含 itemScores[]。"""
+        if not wid:
+            return {}
+        data = self._post_json(DETAILS_URL, {"WID": wid})
+        if data.get("code") != "0":
+            return {}
+        return (data.get("datas") or {}).get("details") or {}
 
 
 # ── 缓存 ─────────────────────────────────────────────────────────────────────
@@ -278,24 +295,103 @@ def grade_cache_key(g: dict) -> str:
     return f"{g.get('_termCode', '')}|{g.get('courseNo', g.get('courseName', ''))}"
 
 
-def format_grade(g: dict, old_score: str | None = None) -> str:
+# ── 学期/平均分工具 ─────────────────────────────────────────────────────────
+_YEAR_NAMES = ["大一", "大二", "大三", "大四", "大五", "大六", "大七"]
+_SEM_NAMES = {"1": "第一学期", "2": "第二学期", "3": "小学期"}
+
+
+def parse_entry_year(student_id: str) -> int:
+    """从学号解析入学年份，例如 2024012616 → 2024。"""
+    m = re.match(r"^(\d{4})", student_id or "")
+    return int(m.group(1)) if m else 2024
+
+
+def format_term(term_code: str, entry_year: int) -> str:
+    """2024-2025-1 + entry_year=2024 → 大一第一学期。"""
+    m = re.match(r"(\d{4})-(\d{4})-(\d+)", term_code or "")
+    if not m:
+        return term_code or ""
+    start_year, _, sem = m.groups()
+    year_idx = int(start_year) - entry_year + 1
+    if 1 <= year_idx <= len(_YEAR_NAMES):
+        year_name = _YEAR_NAMES[year_idx - 1]
+    else:
+        year_name = f"第{year_idx}学年"
+    sem_name = _SEM_NAMES.get(sem, f"第{sem}学期")
+    return year_name + sem_name
+
+
+def _to_float(v) -> float | None:
+    if v is None or v == "":
+        return None
+    try:
+        return float(str(v).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _pick(g: dict, *keys) -> str | None:
+    """从多个候选字段名中取第一个非空值。"""
+    for k in keys:
+        v = g.get(k)
+        if v not in (None, "", "-"):
+            return str(v)
+    return None
+
+
+def compute_weighted_avg(grades: list[dict]) -> float | None:
+    """按学分加权平均；非数字成绩（如"良好"/"优秀"）不计入。"""
+    total_score = 0.0
+    total_credit = 0.0
+    for g in grades:
+        score = _to_float(g.get("score"))
+        credit = _to_float(g.get("credit"))
+        if score is None or credit is None or credit <= 0:
+            continue
+        total_score += score * credit
+        total_credit += credit
+    return total_score / total_credit if total_credit > 0 else None
+
+
+def _enrich_with_item_scores(client: "JwxtSession", g: dict) -> None:
+    """请求 details.do，把平时/期末成绩塞回 g。失败静默。"""
+    if not g.get("_hasItemScores"):
+        return
+    try:
+        d = client.fetch_grade_details(g.get("WID", ""))
+    except Exception as e:
+        log.warning(f"取分项成绩失败 ({g.get('courseName')}): {type(e).__name__}: {e}")
+        return
+    for item in d.get("itemScores") or []:
+        code = item.get("code", "")
+        val = item.get("value", "")
+        if code == "PSCJ":
+            g["usualScore"] = val
+        elif code == "QMCJ":
+            g["finalScore"] = val
+
+
+def format_grade(g: dict, entry_year: int, old_score: str | None = None) -> str:
     name = g.get("courseName", "未知课程")
     term = g.get("_termCode", "")
     score = g.get("score", "未出")
     credit = g.get("credit", "")
-    course_type = g.get("courseType", "")
+    usual = _pick(g, "pscj", "usualScore", "regularScore", "ordinaryScore", "psbfb")
+    final = _pick(g, "qmcj", "finalScore", "endTermScore", "examScore", "qmbfb")
 
     lines = [f"<b>{name}</b>"]
     if term:
-        lines.append(f"学期：{term}")
+        lines.append(f"学期：{format_term(term, entry_year)}")
+    if usual is not None:
+        lines.append(f"平时成绩：{usual}")
+    if final is not None:
+        lines.append(f"期末成绩：{final}")
     if old_score is not None:
-        lines.append(f"成绩：<s>{old_score}</s> → <b>{score}</b>")
+        lines.append(f"总成绩：<s>{old_score}</s> → <b>{score}</b>")
     else:
-        lines.append(f"成绩：{score}")
+        lines.append(f"总成绩：{score}")
     if credit:
         lines.append(f"学分：{credit}")
-    if course_type:
-        lines.append(f"课程类型：{course_type}")
     return "\n".join(lines)
 
 
@@ -311,19 +407,20 @@ def _send_batch(bot_token: str, chat_id: str, header: str, bodies: list[str]) ->
 
 
 # ── 单次轮询逻辑（抽出来方便测试）────────────────────────────────────────────
-def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str) -> bool:
+def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str,
+              entry_year: int) -> bool:
     """
     执行一次成绩查询 + 推送。返回 True 表示成功，False 表示需要稍后重试。
     """
     # 尝试直接用现有 Session 查询，会话失效则重新登录
     try:
-        grades = client.fetch_all_grades(cache.get("active_terms"))
+        grades = client.fetch_all_grades()
     except SessionExpired:
         log.info("会话已过期，重新登录...")
         if not client.login():
             return False
         try:
-            grades = client.fetch_all_grades(cache.get("active_terms"))
+            grades = client.fetch_all_grades()
         except Exception as e:
             log.error(f"重新登录后仍失败: {e}")
             return False
@@ -350,7 +447,13 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str) ->
             scores_cache[key] = new_score
             updated.append((g, old))
 
-    # 更新 active_terms：有数据的学期列表（用于下次只查这些学期）
+    # 给新成绩 / 变更成绩补分项成绩（平时 + 期末）
+    for g in new_grades:
+        _enrich_with_item_scores(client, g)
+    for g, _ in updated:
+        _enrich_with_item_scores(client, g)
+
+    # 更新 active_terms：有数据的学期列表（兼容旧缓存结构）
     new_active_terms = sorted({g["_termCode"] for g in grades}, reverse=True)
     active_terms_changed = new_active_terms != cache.get("active_terms", [])
     cache["active_terms"] = new_active_terms
@@ -363,7 +466,7 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str) ->
         _send_batch(
             bot_token, chat_id,
             f"🎓 发现 {len(new_grades)} 条新成绩！\n{'─' * 20}\n",
-            [format_grade(g) for g in new_grades],
+            [format_grade(g, entry_year) for g in new_grades],
         )
 
     if updated:
@@ -371,8 +474,24 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str) ->
         _send_batch(
             bot_token, chat_id,
             f"🔄 {len(updated)} 条成绩有变更！\n{'─' * 20}\n",
-            [format_grade(g, old) for g, old in updated],
+            [format_grade(g, entry_year, old) for g, old in updated],
         )
+
+    if new_grades or updated:
+        changed_terms = {g["_termCode"] for g in new_grades}
+        changed_terms.update(g["_termCode"] for g, _ in updated)
+
+        avg_lines = ["📊 <b>平均分统计</b>"]
+        for term in sorted(changed_terms, reverse=True):
+            term_grades = [g for g in grades if g.get("_termCode") == term]
+            avg = compute_weighted_avg(term_grades)
+            if avg is not None:
+                avg_lines.append(f"{format_term(term, entry_year)}：{avg:.2f}")
+        overall = compute_weighted_avg(grades)
+        if overall is not None:
+            avg_lines.append(f"总平均分：{overall:.2f}")
+        if len(avg_lines) > 1:
+            send_telegram(bot_token, chat_id, "\n".join(avg_lines))
 
     if not new_grades and not updated:
         log.info(f"暂无新成绩（共 {len(grades)} 条已知成绩）")
@@ -390,6 +509,7 @@ def run():
 
     cache = load_cache()
     client = JwxtSession(cfg["jwxt"]["username"], cfg["jwxt"]["password"])
+    entry_year = parse_entry_year(cfg["jwxt"]["username"])
 
     log.info(f"成绩监控启动 (PID {os.getpid()})，查询间隔 {interval_min} 分钟")
     send_telegram(
@@ -409,7 +529,7 @@ def run():
     while True:
         try:
             log.info("开始查询成绩...")
-            success = poll_once(client, cache, bot_token, chat_id)
+            success = poll_once(client, cache, bot_token, chat_id, entry_year)
 
             if success:
                 failure_streak = 0
