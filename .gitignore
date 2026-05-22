@@ -1,0 +1,7 @@
+config.json
+grades_cache.json
+grade_monitor.log*
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
