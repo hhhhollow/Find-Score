@@ -4,8 +4,8 @@ PLIST=~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist
 LABEL=com.hhhhollow.gradeMonitor
 
 if launchctl list | grep -q "$LABEL"; then
-    echo "⚠️  成绩监控已加载"
-    launchctl list | grep gradeMonitor
+    echo "⚠️  成绩监控已加载，立刻触发一次查询..."
+    launchctl kickstart "gui/$(id -u)/$LABEL"
     exit 0
 fi
 
