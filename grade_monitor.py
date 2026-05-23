@@ -172,6 +172,8 @@ class JwxtSession:
     # ------------------------------------------------------------------
     def login(self) -> bool:
         """完整 CAS 登录流程。"""
+        # 清掉旧 cookies，避免残留的 CASTGC 让 CAS 跳过登录表单直接 302 发票
+        self.session.cookies.clear()
         try:
             r = self.session.get(
                 f"{CAS_HOST}{CAS_LOGIN_PATH}",
@@ -551,9 +553,9 @@ def load_users(cfg: dict) -> list[dict]:
 
 
 # ── 单用户处理（一次轮询）──────────────────────────────────────────────────
-# 告警阈值：必须 ≥10 次失败 且 距首次失败 ≥6 小时。暗唤醒导致的零星失败凑不齐。
-ALERT_STREAK = 10
-ALERT_DURATION = 6 * 3600
+# 告警阈值：连续失败 ≥1 小时 且 ≥2 次（次数兜底，避免缓存被外部改动后单次触发）
+ALERT_STREAK = 2
+ALERT_DURATION = 3600
 
 
 def process_user(user: dict) -> bool:
@@ -624,9 +626,7 @@ def run_once():
 
 
 def run_loop():
-    """循环模式：本机手动调试用，launchd 不需要。"""
-    cfg = load_config()
-    interval = int(cfg.get("interval_minutes", 20)) * 60
+    """循环模式：launchd 长驻进程使用。每轮重读 config，改 interval_minutes 即刻生效。"""
     while True:
         try:
             run_once()
@@ -635,6 +635,11 @@ def run_loop():
             return
         except Exception as e:
             log.error(f"循环异常: {type(e).__name__}: {e}", exc_info=True)
+        try:
+            interval = int(load_config().get("interval_minutes", 20)) * 60
+        except Exception as e:
+            log.warning(f"读取 interval_minutes 失败，回退 20 分钟: {e}")
+            interval = 1200
         log.info(f"等待 {interval//60} 分钟后再跑一轮...")
         time.sleep(interval)
 

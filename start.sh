@@ -1,7 +1,8 @@
 #!/bin/bash
-# 加载 LaunchAgent；launchd 立刻跑一次，之后按 plist 中 StartInterval 定时（睡眠期间不跑）
+# 加载 LaunchAgent；脚本自己按 config.json 的 interval_minutes 长驻循环
 PLIST=~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist
 LABEL=com.hhhhollow.gradeMonitor
+DIR="$(dirname "$0")"
 
 if launchctl list | grep -q "$LABEL"; then
     echo "⚠️  成绩监控已加载，立刻触发一次查询..."
@@ -13,7 +14,8 @@ launchctl load "$PLIST"
 sleep 2
 
 if launchctl list | grep -q "$LABEL"; then
-    echo "✅ 成绩监控已加载（launchd 每 20 分钟触发一次；合盖睡眠期间不跑）"
+    INTERVAL=$(python3 -c "import json; print(json.load(open('$DIR/config.json')).get('interval_minutes', 20))" 2>/dev/null || echo "?")
+    echo "✅ 成绩监控已加载（长驻 loop 模式：每 ${INTERVAL} 分钟一轮；改 config.json 即生效）"
     launchctl list | grep gradeMonitor
 else
     echo "❌ 加载失败，请检查日志: tail launchd.stderr.log"

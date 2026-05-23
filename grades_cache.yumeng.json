@@ -46,8 +46,8 @@
     "2024-2025-1|AE107": "94"
   },
   "failure": {
-    "streak": 3,
-    "first_failure_ts": 1779513365.2972338,
+    "streak": 0,
+    "first_failure_ts": null,
     "alert_sent": false
   }
 }
