@@ -1,6 +1,9 @@
 config.json
-grades_cache.json
+grades_cache.*.json
+cookies.*.json
 grade_monitor.log*
+launchd.stdout.log
+launchd.stderr.log
 .venv/
 __pycache__/
 *.pyc

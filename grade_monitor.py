@@ -118,15 +118,44 @@ class SessionExpired(Exception):
 
 
 class JwxtSession:
-    def __init__(self, username: str, password: str):
+    def __init__(self, username: str, password: str, cookies_path: Path | None = None):
         self.username = username
         self.password = password
+        self.cookies_path = cookies_path
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": USER_AGENT,
             "Referer": f"{JWXT_BASE}/jwapp/sys/homeapp/home/index.html?contextPath=/jwapp",
         })
-        self._logged_in = False
+        if cookies_path and cookies_path.exists():
+            self._load_cookies()
+
+    # ------------------------------------------------------------------
+    def _load_cookies(self) -> None:
+        try:
+            with open(self.cookies_path, encoding="utf-8") as f:
+                data = json.load(f)
+            for c in data:
+                self.session.cookies.set(
+                    c["name"], c["value"],
+                    domain=c.get("domain", ""),
+                    path=c.get("path", "/"),
+                )
+            log.info(f"[{self.username}] 已加载持久 cookies ({len(data)} 个)")
+        except Exception as e:
+            log.warning(f"[{self.username}] cookies 加载失败，忽略: {e}")
+
+    def _save_cookies(self) -> None:
+        if not self.cookies_path:
+            return
+        try:
+            data = [
+                {"name": c.name, "value": c.value, "domain": c.domain, "path": c.path}
+                for c in self.session.cookies
+            ]
+            atomic_write_json(self.cookies_path, data)
+        except Exception as e:
+            log.warning(f"[{self.username}] cookies 保存失败: {e}")
 
     # ------------------------------------------------------------------
     def _need_captcha(self) -> bool:
@@ -182,7 +211,6 @@ class JwxtSession:
             )
 
             if JWXT_BASE in r.url:
-                self._logged_in = True
                 log.info(f"[{self.username}] CAS 登录成功")
                 # 注册 cjzhcxapp 应用上下文（不然 cxwdcj.do 会 403）
                 try:
@@ -193,6 +221,7 @@ class JwxtSession:
                     )
                 except Exception as e:
                     log.warning(f"访问 cjzhcxapp 入口失败（可能不影响）: {e}")
+                self._save_cookies()
                 return True
 
             if "showErrorTip" in r.text or "密码错误" in r.text:
@@ -207,10 +236,12 @@ class JwxtSession:
 
     # ------------------------------------------------------------------
     def _post_json(self, url: str, data: dict | None = None) -> dict:
-        """POST + 检测会话失效（302 → CAS 或非 JSON 响应）。"""
+        """POST + 检测会话失效（302 跳 CAS / 401-403 / 非 JSON 响应）。"""
         r = self.session.post(url, data=data or {}, timeout=15, allow_redirects=False)
         if r.status_code in (301, 302):
             raise SessionExpired(f"被重定向到 {r.headers.get('Location', '?')}")
+        if r.status_code in (401, 403):
+            raise SessionExpired(f"HTTP {r.status_code}（app 上下文/会话失效）")
         r.raise_for_status()
         ctype = r.headers.get("Content-Type", "")
         if "json" not in ctype.lower():
@@ -537,10 +568,13 @@ def process_user(user: dict) -> bool:
     cache = load_cache(name)
     fail = cache["failure"]
 
-    client = JwxtSession(jwxt["username"], jwxt["password"])
+    cookies_path = BASE_DIR / f"cookies.{_safe_name(name)}.json"
+    client = JwxtSession(jwxt["username"], jwxt["password"], cookies_path)
+
     success = False
     try:
-        if client.login():
+        # 有 cookies 直接试；没有先登。失效时 poll_once 内部会捕获并自动重登。
+        if cookies_path.exists() or client.login():
             success = poll_once(client, cache, bot_token, chat_id, entry_year, name)
     except Exception as e:
         log.error(f"[{name}] 处理异常: {type(e).__name__}: {e}", exc_info=True)
