@@ -183,7 +183,7 @@ class JwxtSession:
 
             if JWXT_BASE in r.url:
                 self._logged_in = True
-                log.info("CAS 登录成功")
+                log.info(f"[{self.username}] CAS 登录成功")
                 # 注册 cjzhcxapp 应用上下文（不然 cxwdcj.do 会 403）
                 try:
                     self.session.get(
@@ -206,20 +206,8 @@ class JwxtSession:
             return False
 
     # ------------------------------------------------------------------
-    def _request_json(self, url: str, params: dict | None = None) -> dict:
-        """统一封装：检测会话失效抛 SessionExpired。"""
-        r = self.session.get(url, params=params, timeout=15, allow_redirects=False)
-        # 会话失效时教务系统通常 302 跳到 CAS
-        if r.status_code in (301, 302):
-            raise SessionExpired(f"被重定向到 {r.headers.get('Location', '?')}")
-        r.raise_for_status()
-        ctype = r.headers.get("Content-Type", "")
-        if "json" not in ctype.lower():
-            raise SessionExpired(f"非 JSON 响应 ({ctype})")
-        return r.json()
-
     def _post_json(self, url: str, data: dict | None = None) -> dict:
-        """POST 版的 _request_json：检测会话失效。"""
+        """POST + 检测会话失效（302 → CAS 或非 JSON 响应）。"""
         r = self.session.post(url, data=data or {}, timeout=15, allow_redirects=False)
         if r.status_code in (301, 302):
             raise SessionExpired(f"被重定向到 {r.headers.get('Location', '?')}")
@@ -238,19 +226,19 @@ class JwxtSession:
         if data.get("code") != "0":
             return []
         rows = ((data.get("datas") or {}).get("cxwdcj") or {}).get("rows") or []
-        out: list[dict] = []
-        for r in rows:
-            out.append({
-                "_termCode": r.get("XNXQDM", ""),
-                "courseNo": r.get("KCH", ""),
-                "courseName": r.get("KCM", "未知课程"),
-                "score": r.get("XSZCJ", ""),
-                "credit": r.get("XF", ""),
-                "gradePoint": r.get("JD", ""),
-                "WID": r.get("WID", ""),
-                "_hasItemScores": bool(r.get("FXCJ")),
-            })
-        return out
+        return [
+            {
+                "_termCode": row.get("XNXQDM", ""),
+                "courseNo": row.get("KCH", ""),
+                "courseName": row.get("KCM", "未知课程"),
+                "score": row.get("XSZCJ", ""),
+                "credit": row.get("XF", ""),
+                "gradePoint": row.get("JD", ""),
+                "WID": row.get("WID", ""),
+                "_hasItemScores": bool(row.get("FXCJ")),
+            }
+            for row in rows
+        ]
 
     def fetch_grade_details(self, wid: str) -> dict:
         """拉单门课的分项成绩 → 返回 details 子对象，含 itemScores[]。"""
@@ -263,32 +251,59 @@ class JwxtSession:
 
 
 # ── 缓存 ─────────────────────────────────────────────────────────────────────
-def load_cache() -> dict:
+def _safe_name(name: str) -> str:
+    """把用户标识转成可作文件名的安全字符串。"""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", name) or "default"
+
+
+def cache_path_for(user_name: str) -> Path:
+    return BASE_DIR / f"grades_cache.{_safe_name(user_name)}.json"
+
+
+def _empty_state() -> dict:
+    return {
+        "scores": {},
+        "failure": {"streak": 0, "first_failure_ts": None, "alert_sent": False},
+    }
+
+
+def load_cache(user_name: str) -> dict:
     """
     缓存结构:
     {
       "scores": { "term|courseNo": "分数" },
-      "active_terms": ["2025-2026-1", "2024-2025-2", ...]
+      "failure": {"streak": int, "first_failure_ts": float|None, "alert_sent": bool}
     }
+    自动迁移旧的 grades_cache.json → grades_cache.{user}.json（仅对第一个用户）。
     """
-    if not GRADES_CACHE_FILE.exists():
-        return {"scores": {}, "active_terms": []}
+    path = cache_path_for(user_name)
+    if not path.exists() and GRADES_CACHE_FILE.exists():
+        try:
+            os.replace(GRADES_CACHE_FILE, path)
+            log.info(f"已把旧缓存 grades_cache.json 迁移为 {path.name}")
+        except OSError as e:
+            log.warning(f"迁移旧缓存失败: {e}")
+
+    if not path.exists():
+        return _empty_state()
     try:
-        with open(GRADES_CACHE_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        # 兼容旧版本（顶层就是 scores dict）
-        if "scores" not in data:
-            return {"scores": data, "active_terms": []}
-        data.setdefault("scores", {})
-        data.setdefault("active_terms", [])
-        return data
     except Exception as e:
-        log.warning(f"缓存文件损坏，重建: {e}")
-        return {"scores": {}, "active_terms": []}
+        log.warning(f"{path.name} 损坏，重建: {e}")
+        return _empty_state()
+
+    data.setdefault("scores", {})
+    fail = data.setdefault("failure", {})
+    fail.setdefault("streak", 0)
+    fail.setdefault("first_failure_ts", None)
+    fail.setdefault("alert_sent", False)
+    data.pop("active_terms", None)  # 旧字段，清理
+    return data
 
 
-def save_cache(cache: dict) -> None:
-    atomic_write_json(GRADES_CACHE_FILE, cache)
+def save_cache(user_name: str, cache: dict) -> None:
+    atomic_write_json(cache_path_for(user_name), cache)
 
 
 def grade_cache_key(g: dict) -> str:
@@ -330,15 +345,6 @@ def _to_float(v) -> float | None:
         return None
 
 
-def _pick(g: dict, *keys) -> str | None:
-    """从多个候选字段名中取第一个非空值。"""
-    for k in keys:
-        v = g.get(k)
-        if v not in (None, "", "-"):
-            return str(v)
-    return None
-
-
 def compute_weighted_avg(grades: list[dict]) -> float | None:
     """按学分加权平均；非数字成绩（如"良好"/"优秀"）不计入。"""
     total_score = 0.0
@@ -376,15 +382,15 @@ def format_grade(g: dict, entry_year: int, old_score: str | None = None) -> str:
     term = g.get("_termCode", "")
     score = g.get("score", "未出")
     credit = g.get("credit", "")
-    usual = _pick(g, "pscj", "usualScore", "regularScore", "ordinaryScore", "psbfb")
-    final = _pick(g, "qmcj", "finalScore", "endTermScore", "examScore", "qmbfb")
+    usual = g.get("usualScore")
+    final = g.get("finalScore")
 
     lines = [f"<b>{name}</b>"]
     if term:
         lines.append(f"学期：{format_term(term, entry_year)}")
-    if usual is not None:
+    if usual:
         lines.append(f"平时成绩：{usual}")
-    if final is not None:
+    if final:
         lines.append(f"期末成绩：{final}")
     if old_score is not None:
         lines.append(f"总成绩：<s>{old_score}</s> → <b>{score}</b>")
@@ -408,28 +414,28 @@ def _send_batch(bot_token: str, chat_id: str, header: str, bodies: list[str]) ->
 
 # ── 单次轮询逻辑（抽出来方便测试）────────────────────────────────────────────
 def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str,
-              entry_year: int) -> bool:
+              entry_year: int, user_name: str = "default") -> bool:
     """
     执行一次成绩查询 + 推送。返回 True 表示成功，False 表示需要稍后重试。
     """
-    # 尝试直接用现有 Session 查询，会话失效则重新登录
+    tag = f"[{user_name}]"
     try:
         grades = client.fetch_all_grades()
     except SessionExpired:
-        log.info("会话已过期，重新登录...")
+        log.info(f"{tag} 会话已过期，重新登录...")
         if not client.login():
             return False
         try:
             grades = client.fetch_all_grades()
         except Exception as e:
-            log.error(f"重新登录后仍失败: {e}")
+            log.error(f"{tag} 重新登录后仍失败: {e}")
             return False
     except Exception as e:
-        log.error(f"成绩查询异常: {type(e).__name__}: {e}")
+        log.error(f"{tag} 成绩查询异常: {type(e).__name__}: {e}")
         return False
 
     if not grades:
-        log.warning("查询返回空，可能是接口异常，本次跳过")
+        log.warning(f"{tag} 查询返回空，本次跳过")
         return False
 
     scores_cache: dict = cache["scores"]
@@ -448,32 +454,28 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str,
             updated.append((g, old))
 
     # 给新成绩 / 变更成绩补分项成绩（平时 + 期末）
-    for g in new_grades:
-        _enrich_with_item_scores(client, g)
-    for g, _ in updated:
+    for g in (*new_grades, *(u[0] for u in updated)):
         _enrich_with_item_scores(client, g)
 
-    # 更新 active_terms：有数据的学期列表（兼容旧缓存结构）
-    new_active_terms = sorted({g["_termCode"] for g in grades}, reverse=True)
-    active_terms_changed = new_active_terms != cache.get("active_terms", [])
-    cache["active_terms"] = new_active_terms
+    if new_grades or updated:
+        save_cache(user_name, cache)
 
-    if new_grades or updated or active_terms_changed:
-        save_cache(cache)
+    # Telegram 消息头里带用户名，方便多人共用一个 chat 时区分
+    who = f"<b>[{user_name}]</b>"
 
     if new_grades:
-        log.info(f"发现 {len(new_grades)} 条新成绩")
+        log.info(f"{tag} 发现 {len(new_grades)} 条新成绩")
         _send_batch(
             bot_token, chat_id,
-            f"🎓 发现 {len(new_grades)} 条新成绩！\n{'─' * 20}\n",
+            f"🎓 {who} 发现 {len(new_grades)} 条新成绩！\n{'─' * 20}\n",
             [format_grade(g, entry_year) for g in new_grades],
         )
 
     if updated:
-        log.info(f"发现 {len(updated)} 条成绩变更")
+        log.info(f"{tag} 发现 {len(updated)} 条成绩变更")
         _send_batch(
             bot_token, chat_id,
-            f"🔄 {len(updated)} 条成绩有变更！\n{'─' * 20}\n",
+            f"🔄 {who} {len(updated)} 条成绩有变更！\n{'─' * 20}\n",
             [format_grade(g, entry_year, old) for g, old in updated],
         )
 
@@ -481,7 +483,7 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str,
         changed_terms = {g["_termCode"] for g in new_grades}
         changed_terms.update(g["_termCode"] for g, _ in updated)
 
-        avg_lines = ["📊 <b>平均分统计</b>"]
+        avg_lines = [f"📊 {who} 平均分统计"]
         for term in sorted(changed_terms, reverse=True):
             term_grades = [g for g in grades if g.get("_termCode") == term]
             avg = compute_weighted_avg(term_grades)
@@ -494,69 +496,117 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str,
             send_telegram(bot_token, chat_id, "\n".join(avg_lines))
 
     if not new_grades and not updated:
-        log.info(f"暂无新成绩（共 {len(grades)} 条已知成绩）")
+        log.info(f"{tag} 暂无新成绩（共 {len(grades)} 条已知成绩）")
 
     return True
 
 
-# ── 主循环 ───────────────────────────────────────────────────────────────────
-def run():
-    cfg = load_config()
-    tg = cfg["telegram"]
+# ── 多用户配置 ────────────────────────────────────────────────────────────
+def load_users(cfg: dict) -> list[dict]:
+    """支持新 multi-user 格式（cfg.users[]）和旧 single-user 格式。
+    每个 user dict 必须含 name / jwxt / telegram。"""
+    if "users" in cfg:
+        users = cfg["users"]
+    else:
+        # 旧版兼容：顶层 jwxt + telegram → 单用户
+        users = [{
+            "name": cfg["jwxt"]["username"],
+            "jwxt": cfg["jwxt"],
+            "telegram": cfg["telegram"],
+        }]
+    for u in users:
+        u.setdefault("name", u["jwxt"]["username"])
+    return users
+
+
+# ── 单用户处理（一次轮询）──────────────────────────────────────────────────
+# 告警阈值：必须 ≥10 次失败 且 距首次失败 ≥6 小时。暗唤醒导致的零星失败凑不齐。
+ALERT_STREAK = 10
+ALERT_DURATION = 6 * 3600
+
+
+def process_user(user: dict) -> bool:
+    """处理单个用户：登录 + 查询 + 推送 + 更新失败状态。返回 success。"""
+    name = user["name"]
+    jwxt = user["jwxt"]
+    tg = user["telegram"]
     bot_token, chat_id = tg["bot_token"], tg["chat_id"]
-    interval_min = int(cfg.get("interval_minutes", 20))
-    interval = interval_min * 60
+    entry_year = parse_entry_year(jwxt["username"])
 
-    cache = load_cache()
-    client = JwxtSession(cfg["jwxt"]["username"], cfg["jwxt"]["password"])
-    entry_year = parse_entry_year(cfg["jwxt"]["username"])
+    log.info(f"[{name}] 开始查询成绩...")
+    cache = load_cache(name)
+    fail = cache["failure"]
 
-    log.info(f"成绩监控启动 (PID {os.getpid()})，查询间隔 {interval_min} 分钟")
-    send_telegram(
-        bot_token, chat_id,
-        f"✅ 成绩监控已启动\n每 {interval_min} 分钟查询一次"
-    )
+    client = JwxtSession(jwxt["username"], jwxt["password"])
+    success = False
+    try:
+        if client.login():
+            success = poll_once(client, cache, bot_token, chat_id, entry_year, name)
+    except Exception as e:
+        log.error(f"[{name}] 处理异常: {type(e).__name__}: {e}", exc_info=True)
 
-    # 首次登录
-    if not client.login():
-        send_telegram(bot_token, chat_id, "❌ 启动时首次登录失败，请检查账号密码")
-        sys.exit(1)
+    # 更新失败状态
+    if success:
+        if fail.get("alert_sent"):
+            send_telegram(bot_token, chat_id, f"✅ [{name}] 成绩查询恢复正常")
+        fail["streak"] = 0
+        fail["first_failure_ts"] = None
+        fail["alert_sent"] = False
+    else:
+        fail["streak"] = int(fail.get("streak") or 0) + 1
+        if fail.get("first_failure_ts") is None:
+            fail["first_failure_ts"] = time.time()
+        elapsed = time.time() - fail["first_failure_ts"]
+        if (not fail["alert_sent"]
+                and fail["streak"] >= ALERT_STREAK
+                and elapsed >= ALERT_DURATION):
+            send_telegram(
+                bot_token, chat_id,
+                f"⚠️ [{name}] 成绩查询连续 {fail['streak']} 次失败"
+                f"（已持续 {elapsed/3600:.1f} 小时），请检查日志"
+            )
+            fail["alert_sent"] = True
+        log.warning(
+            f"[{name}] 失败 {fail['streak']} 次"
+            f"（已 {elapsed/60:.0f} 分钟）"
+        )
 
-    backoff = 30           # 失败后的退避秒数（指数）
-    max_backoff = 1800     # 上限 30 分钟
-    failure_streak = 0
+    save_cache(name, cache)
+    return success
 
+
+# ── 入口：一次性模式 / 循环模式 ──────────────────────────────────────────
+def run_once():
+    """跑一遍所有用户后退出。供 launchd StartInterval 调用。"""
+    cfg = load_config()
+    users = load_users(cfg)
+    log.info(f"=== 成绩监控启动 (PID {os.getpid()}, {len(users)} 用户) ===")
+    for user in users:
+        try:
+            process_user(user)
+        except Exception as e:
+            log.error(f"[{user.get('name')}] 顶层异常: {type(e).__name__}: {e}", exc_info=True)
+    log.info("=== 本轮结束 ===")
+
+
+def run_loop():
+    """循环模式：本机手动调试用，launchd 不需要。"""
+    cfg = load_config()
+    interval = int(cfg.get("interval_minutes", 20)) * 60
     while True:
         try:
-            log.info("开始查询成绩...")
-            success = poll_once(client, cache, bot_token, chat_id, entry_year)
-
-            if success:
-                failure_streak = 0
-                backoff = 30
-                wait = interval
-                log.info(f"等待 {interval_min} 分钟后再次查询...")
-            else:
-                failure_streak += 1
-                if failure_streak == 5:
-                    send_telegram(
-                        bot_token, chat_id,
-                        f"⚠️ 连续 {failure_streak} 次查询失败，请检查日志"
-                    )
-                wait = min(backoff, max_backoff)
-                backoff *= 2
-                log.warning(f"失败 {failure_streak} 次，{wait}s 后重试")
-
-            time.sleep(wait)
-
+            run_once()
         except KeyboardInterrupt:
             log.info("收到 Ctrl+C，退出")
-            send_telegram(bot_token, chat_id, "⏹ 成绩监控已停止")
-            break
+            return
         except Exception as e:
-            log.error(f"主循环未捕获异常: {type(e).__name__}: {e}", exc_info=True)
-            time.sleep(60)  # 未知异常稍等再继续
+            log.error(f"循环异常: {type(e).__name__}: {e}", exc_info=True)
+        log.info(f"等待 {interval//60} 分钟后再跑一轮...")
+        time.sleep(interval)
 
 
 if __name__ == "__main__":
-    run()
+    if len(sys.argv) > 1 and sys.argv[1] == "loop":
+        run_loop()
+    else:
+        run_once()

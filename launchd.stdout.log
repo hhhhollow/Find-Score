@@ -1,0 +1,12 @@
+2026-05-23 09:14:05,313 [INFO] 成绩监控启动 (PID 13970)，查询间隔 20 分钟
+2026-05-23 09:14:12,811 [ERROR] 登录异常: SSLError: HTTPSConnectionPool(host='jwxt.bistu.edu.cn', port=443): Max retries exceeded with url: /jwapp/sys/emappagelog/modules/emappagelog/loginNew.do?ticket=ST-266711-NmNERmoLnpJrhsC9Li3dGzIJcxQlocalhost (Caused by SSLError(SSLEOFError(8, '[SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)')))
+2026-05-23 09:15:05,963 [INFO] 成绩监控启动 (PID 14003)，查询间隔 20 分钟
+2026-05-23 09:15:08,243 [INFO] CAS 登录成功
+2026-05-23 09:15:08,268 [INFO] 开始查询成绩...
+2026-05-23 09:15:10,359 [INFO] 暂无新成绩（共 44 条已知成绩）
+2026-05-23 09:15:10,359 [INFO] 等待 20 分钟后再次查询...
+2026-05-23 09:21:10,916 [INFO] === 成绩监控启动 (PID 14212, 1 用户) ===
+2026-05-23 09:21:10,917 [INFO] [yumeng] 开始查询成绩...
+2026-05-23 09:21:12,111 [INFO] CAS 登录成功
+2026-05-23 09:21:14,698 [INFO] 暂无新成绩（共 44 条已知成绩）
+2026-05-23 09:21:14,704 [INFO] === 本轮结束 ===
