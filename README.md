@@ -15,15 +15,28 @@
 
 ```
 Find-Score/
-├── grade_monitor.py        主程序
-├── config.json             你的账号 + Telegram 配置（git 忽略）
-├── requirements.txt        Python 依赖
-├── start.sh / stop.sh      启停 launchd
-├── restart.sh / status.sh  重启 / 查状态
-├── grade_monitor.log       运行日志（带 2MB 滚动）
-├── grades_cache.<name>.json 每用户成绩缓存 + 失败状态（git 忽略）
-├── cookies.<name>.json     每用户持久化 cookies（git 忽略）
-└── .venv/                  Python 虚拟环境（git 忽略）
+├── grade_monitor/              主程序包
+│   ├── __init__.py             包标识
+│   ├── __main__.py             CLI 入口（run_once / run_loop）
+│   ├── constants.py            路径常量、URL 端点
+│   ├── logging_config.py       日志配置（带 2MB 滚动）
+│   ├── config.py               配置加载 & 多用户兼容
+│   ├── crypto.py               AES 密码加密
+│   ├── session.py              教务系统 HTTP 会话
+│   ├── cache.py                成绩缓存 & 原子写文件
+│   ├── formatting.py           学期解析、成绩格式化、平均分
+│   ├── notify.py               Telegram 推送（带重试）
+│   ├── polling.py              单次轮询逻辑
+│   └── monitor.py              单用户处理 & 失败告警
+├── run_monitor.py              顶层启动脚本
+├── config.json                 你的账号 + Telegram 配置（git 忽略）
+├── requirements.txt            Python 依赖
+├── start.sh / stop.sh          启停 launchd
+├── restart.sh / status.sh      重启 / 查状态
+├── grade_monitor.log           运行日志（带 2MB 滚动）
+├── grades_cache.<name>.json    每用户成绩缓存 + 失败状态（git 忽略）
+├── cookies.<name>.json         每用户持久化 cookies（git 忽略）
+└── .venv/                      Python 虚拟环境（git 忽略）
 ```
 
 LaunchAgent plist 在 `~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist`。
@@ -63,12 +76,12 @@ LaunchAgent plist 在 `~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist`�
 
 **手动跑一次**（不等 20 分钟）：
 ```bash
-.venv/bin/python grade_monitor.py
+.venv/bin/python -m grade_monitor
 ```
 
 **用老的循环模式**（持续运行，不通过 launchd；调试用）：
 ```bash
-.venv/bin/python grade_monitor.py loop
+.venv/bin/python -m grade_monitor loop
 ```
 
 ---
@@ -161,10 +174,10 @@ LaunchAgent plist 在 `~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist`�
 ## 调试 & 排错
 
 ```bash
-tail -f grade_monitor.log              # 看实时日志
-.venv/bin/python grade_monitor.py      # 手动跑一次（看输出）
-rm grades_cache.<name>.json            # 清缓存 → 下次会把所有成绩当新的推一遍
-rm cookies.<name>.json                 # 清 cookies → 下次会重新登录
+tail -f grade_monitor.log                 # 看实时日志
+.venv/bin/python -m grade_monitor         # 手动跑一次（看输出）
+rm grades_cache.<name>.json               # 清缓存 → 下次会把所有成绩当新的推一遍
+rm cookies.<name>.json                    # 清 cookies → 下次会重新登录
 ```
 
 **常见情况**
@@ -175,7 +188,7 @@ rm cookies.<name>.json                 # 清 cookies → 下次会重新登录
 | 日志大量 SSL EOF | CAS 限流（一般是短时多次手动登录触发）。等 10-15 分钟，或换 IP（手机热点） |
 | 推送 `[name] 连续 N 次失败` | 真出问题了，检查日志末尾的具体异常 |
 | 缓存里出现没见过的字段 | 旧字段会在 load 时自动清掉，无需手动处理 |
-| 想换 20 分钟为其他间隔 | 编辑 `~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist` 里的 `StartInterval`，然后 `./restart.sh` |
+| 想换 20 分钟为其他间隔 | 编辑 `config.json` 的 `interval_minutes`，下一轮循环自动生效 |
 
 ---
 
@@ -183,13 +196,28 @@ rm cookies.<name>.json                 # 清 cookies → 下次会重新登录
 
 - **合盖断电不会跑**：launchd 不会唤醒电脑来执行任务（plist 未设 `WakeFromSleep`），睡眠期间错过的会合并为唤醒后追跑一次
 - **不插电开盖**会跑：每次 ~5 秒 CPU + 10KB 流量，可忽略
-- **每次都是一次性进程**，跑完即退，没有常驻进程
+- **KeepAlive 自动重启**：进程异常退出后 launchd 会自动重启，间隔至少 60 秒
 
 ---
 
-## 接口细节（开发者备忘）
+## 代码架构
 
-详见 `grade_monitor.py` 顶部常量：
+```
+grade_monitor/
+├── constants.py         所有 URL、路径、阈值常量
+├── logging_config.py    日志配置 → 其他模块 import log
+├── config.py            配置文件读取
+├── crypto.py            AES-CBC 密码加密
+├── session.py           JwxtSession（CAS 登录 + API 调用）
+├── cache.py             成绩缓存（原子写入 + 旧格式迁移）
+├── formatting.py        学期解析 + 成绩格式化 + 加权平均
+├── notify.py            Telegram 推送
+├── polling.py           单次轮询（对比缓存 → 推送变更）
+├── monitor.py           用户处理 + 失败告警
+└── __main__.py          CLI 入口
+```
+
+接口细节详见各模块 docstring：
 
 - **CAS 登录**: `https://wxjw.bistu.edu.cn/authserver/login` （AES-CBC 加密密码）
 - **成绩列表**: `POST /jwapp/sys/cjzhcxapp/modules/wdcj/cxwdcj.do`，body `pageSize=200&pageNumber=1`

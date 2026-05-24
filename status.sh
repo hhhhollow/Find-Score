@@ -12,7 +12,7 @@ fi
 
 echo ""
 echo "=== 当前是否有 Python 进程在跑 ==="
-ps aux | grep grade_monitor.py | grep -v grep || echo "（无 — 长驻模式下应该有一个 python 进程）"
+ps aux | grep "[g]rade_monitor" || echo "（无 — 长驻模式下应该有一个 python 进程）"
 
 echo ""
 echo "=== 最近 15 行日志 ==="
