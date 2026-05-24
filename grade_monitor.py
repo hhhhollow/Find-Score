@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
@@ -123,6 +125,12 @@ class JwxtSession:
         self.password = password
         self.cookies_path = cookies_path
         self.session = requests.Session()
+        # 挂载重试适配器，应对学校网络不稳定（SSL/连接错误自动重试）
+        _retry = Retry(total=3, backoff_factor=1,
+                       status_forcelist=[502, 503, 504],
+                       allowed_methods=["GET", "POST"])
+        self.session.mount("https://", HTTPAdapter(max_retries=_retry))
+        self.session.mount("http://", HTTPAdapter(max_retries=_retry))
         self.session.headers.update({
             "User-Agent": USER_AGENT,
             "Referer": f"{JWXT_BASE}/jwapp/sys/homeapp/home/index.html?contextPath=/jwapp",
@@ -216,11 +224,17 @@ class JwxtSession:
                 log.info(f"[{self.username}] CAS 登录成功")
                 # 注册 cjzhcxapp 应用上下文（不然 cxwdcj.do 会 403）
                 try:
-                    self.session.get(
+                    ctx_r = self.session.get(
                         f"{CJZHCXAPP}/*default/index.do",
                         params={"THEME": "indigo", "forceApp": "cjzhcxapp"},
                         timeout=15,
                     )
+                    if ctx_r.status_code in (401, 403):
+                        log.error(
+                            f"[{self.username}] cjzhcxapp 上下文注册失败 "
+                            f"(HTTP {ctx_r.status_code})，成绩子系统可能不可用"
+                        )
+                        return False
                 except Exception as e:
                     log.warning(f"访问 cjzhcxapp 入口失败（可能不影响）: {e}")
                 self._save_cookies()
@@ -472,6 +486,7 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str,
         return False
 
     scores_cache: dict = cache["scores"]
+    is_cold_start = len(scores_cache) == 0  # 首次运行，缓存为空
     new_grades: list[dict] = []
     updated: list[tuple[dict, str]] = []  # (新成绩字典, 旧分数)
 
@@ -481,10 +496,22 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str,
         old = scores_cache.get(key)
         if old is None:
             scores_cache[key] = new_score
-            new_grades.append(g)
+            if not is_cold_start:
+                new_grades.append(g)
         elif old != new_score:
             scores_cache[key] = new_score
             updated.append((g, old))
+
+    # 冷启动：静默缓存所有成绩，仅发送一条初始化通知
+    if is_cold_start:
+        save_cache(user_name, cache)
+        log.info(f"{tag} 首次运行，已缓存 {len(grades)} 条成绩（不逐条通知）")
+        send_telegram(
+            bot_token, chat_id,
+            f"🎉 {who} 成绩监控已初始化，已缓存 {len(grades)} 门课程，"
+            f"后续有新成绩将自动通知！"
+        )
+        return True
 
     # 给新成绩 / 变更成绩补分项成绩（平时 + 期末）
     for g in (*new_grades, *(u[0] for u in updated)):
