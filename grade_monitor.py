@@ -165,6 +165,28 @@ class JwxtSession:
         except Exception as e:
             log.warning(f"[{self.username}] cookies 保存失败: {e}")
 
+    def nuke_session(self) -> None:
+        """彻底清除所有会话状态：内存 cookies + 持久化 cookies 文件。
+        用于 HTTP 403 等 app 上下文失效后的最后手段。"""
+        self.session.cookies.clear()
+        if self.cookies_path and self.cookies_path.exists():
+            try:
+                self.cookies_path.unlink()
+                log.info(f"[{self.username}] 已删除持久 cookies 文件")
+            except OSError as e:
+                log.warning(f"[{self.username}] 删除 cookies 文件失败: {e}")
+        # 重建全新 session，确保连接池也不复用旧的 TLS 状态
+        old_session = self.session
+        self.session = requests.Session()
+        _retry = Retry(total=3, backoff_factor=1,
+                       status_forcelist=[502, 503, 504],
+                       allowed_methods=["GET", "POST"])
+        self.session.mount("https://", HTTPAdapter(max_retries=_retry))
+        self.session.mount("http://", HTTPAdapter(max_retries=_retry))
+        self.session.headers.update(old_session.headers)
+        old_session.close()
+        log.info(f"[{self.username}] 会话已彻底重置")
+
     # ------------------------------------------------------------------
     def _need_captcha(self) -> bool:
         try:
@@ -474,6 +496,18 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str, chat_id: str,
             return False
         try:
             grades = client.fetch_all_grades()
+        except SessionExpired as e2:
+            # 重新登录后仍 403 / 会话失效 → 彻底清除 cookies 后再试一次
+            log.warning(f"{tag} 重新登录后仍失败: {e2}，彻底清除 cookies 后重试...")
+            client.nuke_session()
+            if not client.login():
+                log.error(f"{tag} 彻底清除后登录仍失败")
+                return False
+            try:
+                grades = client.fetch_all_grades()
+            except Exception as e3:
+                log.error(f"{tag} 彻底清除后仍失败: {e3}")
+                return False
         except Exception as e:
             log.error(f"{tag} 重新登录后仍失败: {e}")
             return False
