@@ -9,7 +9,7 @@ from .formatting import (
     format_term,
 )
 from .logging_config import log
-from .notify import send_batch, send_telegram
+from .notify import send_batch, send_macos_notification, send_telegram
 from .session import JwxtSession, SessionExpired
 
 
@@ -102,6 +102,11 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str,
             f"🎉 {who} 成绩监控已初始化，已缓存 {len(grades)} 门课程，"
             f"后续有新成绩将自动通知！"
         )
+        send_macos_notification(
+            "成绩监控",
+            f"已缓存 {len(grades)} 门课程，后续新成绩将自动通知",
+            subtitle=user_name,
+        )
         return True
 
     # ── 补充分项成绩 ──────────────────────────────────────────────────
@@ -119,6 +124,12 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str,
             f"🎓 {who} 发现 {len(new_grades)} 条新成绩！\n{'─' * 20}\n",
             [format_grade(g, entry_year) for g in new_grades],
         )
+        names = "、".join(g.get("courseName", "?") for g in new_grades[:3])
+        if len(new_grades) > 3:
+            names += f" 等{len(new_grades)}门"
+        send_macos_notification(
+            "🎓 新成绩", names, subtitle=user_name,
+        )
 
     if updated:
         log.info(f"{tag} 发现 {len(updated)} 条成绩变更")
@@ -126,6 +137,15 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str,
             bot_token, chat_id,
             f"🔄 {who} {len(updated)} 条成绩有变更！\n{'─' * 20}\n",
             [format_grade(g, entry_year, old) for g, old in updated],
+        )
+        changes = "、".join(
+            f"{g.get('courseName', '?')} {old}→{g.get('score', '?')}"
+            for g, old in updated[:3]
+        )
+        if len(updated) > 3:
+            changes += f" 等{len(updated)}门"
+        send_macos_notification(
+            "🔄 成绩变更", changes, subtitle=user_name,
         )
 
     # ── 平均分统计 ────────────────────────────────────────────────────

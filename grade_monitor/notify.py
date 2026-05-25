@@ -1,7 +1,8 @@
 """
-Telegram 消息推送（带重试 & 分批发送）。
+消息推送：Telegram（带重试 & 分批发送）+ macOS 本地通知。
 """
 
+import subprocess
 import time
 
 import requests
@@ -28,6 +29,27 @@ def send_telegram(bot_token: str, chat_id: str, text: str,
             time.sleep(wait)
     log.error("Telegram 推送最终失败")
     return False
+
+
+def send_macos_notification(title: str, message: str,
+                            subtitle: str = "", sound: str = "Glass") -> None:
+    """通过 osascript 发送 macOS 系统通知。失败静默，不影响主流程。"""
+    # 转义双引号和反斜杠，防止 AppleScript 注入
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace('"', '\\"')
+
+    script = f'display notification "{_esc(message)}" with title "{_esc(title)}"'
+    if subtitle:
+        script += f' subtitle "{_esc(subtitle)}"'
+    if sound:
+        script += f' sound name "{_esc(sound)}"'
+    try:
+        subprocess.run(
+            ["osascript", "-e", script],
+            timeout=5, capture_output=True,
+        )
+    except Exception as e:
+        log.debug(f"macOS 通知发送失败（不影响 Telegram）: {e}")
 
 
 def send_batch(bot_token: str, chat_id: str, header: str,
