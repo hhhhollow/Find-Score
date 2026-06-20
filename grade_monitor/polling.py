@@ -34,6 +34,43 @@ def _enrich_with_item_scores(client: JwxtSession, g: dict) -> None:
             g["finalScore"] = val
 
 
+def _fetch_grades_resilient(client: JwxtSession, tag: str) -> list[dict] | None:
+    """拉成绩，会话过期时依次尝试：重登 → 彻底重置后重登。
+
+    返回成绩列表（可能为空），全部失败时返回 None。
+    """
+    # 第一次：直接查
+    try:
+        return client.fetch_all_grades()
+    except SessionExpired:
+        log.info(f"{tag} 会话已过期，重新登录...")
+    except Exception as e:
+        log.error(f"{tag} 成绩查询异常: {type(e).__name__}: {e}")
+        return None
+
+    # 第二次：重新登录后再查
+    if not client.login():
+        return None
+    try:
+        return client.fetch_all_grades()
+    except SessionExpired as e:
+        log.warning(f"{tag} 重新登录后仍失败: {e}，彻底清除 cookies 后重试...")
+    except Exception as e:
+        log.error(f"{tag} 重新登录后仍失败: {e}")
+        return None
+
+    # 第三次：彻底重置会话后再登录、再查
+    client.nuke_session()
+    if not client.login():
+        log.error(f"{tag} 彻底清除后登录仍失败")
+        return None
+    try:
+        return client.fetch_all_grades()
+    except Exception as e:
+        log.error(f"{tag} 彻底清除后仍失败: {e}")
+        return None
+
+
 def poll_once(client: JwxtSession, cache: dict, bot_token: str,
               chat_id: str, entry_year: int,
               user_name: str = "default") -> bool:
@@ -42,35 +79,9 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str,
     who = f"<b>[{user_name}]</b>"  # Telegram HTML 前缀
 
     # ── 拉成绩（含会话过期自动重登）────────────────────────────────────
-    try:
-        grades = client.fetch_all_grades()
-    except SessionExpired:
-        log.info(f"{tag} 会话已过期，重新登录...")
-        if not client.login():
-            return False
-        try:
-            grades = client.fetch_all_grades()
-        except SessionExpired as e2:
-            # 重新登录后仍 403 → 彻底清除 cookies 后再试一次
-            log.warning(
-                f"{tag} 重新登录后仍失败: {e2}，彻底清除 cookies 后重试..."
-            )
-            client.nuke_session()
-            if not client.login():
-                log.error(f"{tag} 彻底清除后登录仍失败")
-                return False
-            try:
-                grades = client.fetch_all_grades()
-            except Exception as e3:
-                log.error(f"{tag} 彻底清除后仍失败: {e3}")
-                return False
-        except Exception as e:
-            log.error(f"{tag} 重新登录后仍失败: {e}")
-            return False
-    except Exception as e:
-        log.error(f"{tag} 成绩查询异常: {type(e).__name__}: {e}")
+    grades = _fetch_grades_resilient(client, tag)
+    if grades is None:
         return False
-
     if not grades:
         log.warning(f"{tag} 查询返回空，本次跳过")
         return False
@@ -153,10 +164,14 @@ def poll_once(client: JwxtSession, cache: dict, bot_token: str,
         changed_terms = {g["_termCode"] for g in new_grades}
         changed_terms.update(g["_termCode"] for g, _ in updated)
 
+        # 一次性按学期分组，避免对每个学期重复遍历全部成绩
+        by_term: dict[str, list[dict]] = {}
+        for g in grades:
+            by_term.setdefault(g.get("_termCode", ""), []).append(g)
+
         avg_lines = [f"📊 {who} 平均分统计"]
         for term in sorted(changed_terms, reverse=True):
-            term_grades = [g for g in grades if g.get("_termCode") == term]
-            avg = compute_weighted_avg(term_grades)
+            avg = compute_weighted_avg(by_term.get(term, []))
             if avg is not None:
                 avg_lines.append(
                     f"{format_term(term, entry_year)}：{avg:.2f}"
