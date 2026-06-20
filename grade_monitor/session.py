@@ -123,8 +123,40 @@ class JwxtSession:
                 timeout=10,
             )
             return bool(r.json().get("isNeed", False))
-        except Exception:
+        except Exception as e:
+            log.debug(f"[{self.username}] 验证码检测失败，按不需要处理: {e}")
             return False
+
+    @staticmethod
+    def _parse_login_form(html: str) -> tuple[str | None, str]:
+        """从 CAS 登录页提取 (execution, salt)。execution 缺失时返回 (None, "")。"""
+        m = re.search(r'name="execution"\s+value="([^"]+)"', html)
+        if not m:
+            return None, ""
+        m_salt = re.search(r'id="pwdEncryptSalt"\s+value="([^"]*)"', html)
+        return m.group(1), (m_salt.group(1) if m_salt else "")
+
+    def _register_app_context(self) -> bool:
+        """注册 cjzhcxapp 应用上下文（不然 cxwdcj.do 会 403）。
+
+        网络抖动不算失败（返回 True 继续）；明确的 401/403 才算失败。
+        """
+        try:
+            ctx_r = self.session.get(
+                f"{CJZHCXAPP}/*default/index.do",
+                params={"THEME": "indigo", "forceApp": "cjzhcxapp"},
+                timeout=15,
+            )
+        except Exception as e:
+            log.warning(f"[{self.username}] 访问 cjzhcxapp 入口失败（可能不影响）: {e}")
+            return True
+        if ctx_r.status_code in (401, 403):
+            log.error(
+                f"[{self.username}] cjzhcxapp 上下文注册失败 "
+                f"(HTTP {ctx_r.status_code})，成绩子系统可能不可用"
+            )
+            return False
+        return True
 
     def login(self) -> bool:
         """完整 CAS 登录流程。成功返回 True。"""
@@ -136,16 +168,10 @@ class JwxtSession:
                 params={"service": JWXT_SERVICE},
                 timeout=15,
             )
-            html = r.text
-
-            m = re.search(r'name="execution"\s+value="([^"]+)"', html)
-            if not m:
+            execution, salt = self._parse_login_form(r.text)
+            if not execution:
                 log.error("未能获取 CAS execution token")
                 return False
-            execution = m.group(1)
-
-            m = re.search(r'id="pwdEncryptSalt"\s+value="([^"]*)"', html)
-            salt = m.group(1) if m else ""
 
             if self._need_captcha():
                 log.error(
@@ -169,36 +195,22 @@ class JwxtSession:
                 timeout=20,
                 allow_redirects=True,
             )
-
-            if JWXT_BASE in r.url:
-                log.info(f"[{self.username}] CAS 登录成功")
-                # 注册 cjzhcxapp 应用上下文（不然 cxwdcj.do 会 403）
-                try:
-                    ctx_r = self.session.get(
-                        f"{CJZHCXAPP}/*default/index.do",
-                        params={"THEME": "indigo", "forceApp": "cjzhcxapp"},
-                        timeout=15,
-                    )
-                    if ctx_r.status_code in (401, 403):
-                        log.error(
-                            f"[{self.username}] cjzhcxapp 上下文注册失败 "
-                            f"(HTTP {ctx_r.status_code})，成绩子系统可能不可用"
-                        )
-                        return False
-                except Exception as e:
-                    log.warning(f"访问 cjzhcxapp 入口失败（可能不影响）: {e}")
-                self._save_cookies()
-                return True
-
-            if "showErrorTip" in r.text or "密码错误" in r.text:
-                log.error("登录失败：账号或密码错误")
-            else:
-                log.error(f"登录失败，当前 URL: {r.url}")
-            return False
-
         except Exception as e:
             log.error(f"登录异常: {type(e).__name__}: {e}")
             return False
+
+        if JWXT_BASE in r.url:
+            log.info(f"[{self.username}] CAS 登录成功")
+            if not self._register_app_context():
+                return False
+            self._save_cookies()
+            return True
+
+        if "showErrorTip" in r.text or "密码错误" in r.text:
+            log.error("登录失败：账号或密码错误")
+        else:
+            log.error(f"登录失败，当前 URL: {r.url}")
+        return False
 
     # ── 数据接口 ──────────────────────────────────────────────────────────
 
