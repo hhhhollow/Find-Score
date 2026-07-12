@@ -1,33 +1,132 @@
-"""
-配置文件加载 & 多用户兼容。
-"""
+"""配置加载与边界校验，兼容旧版单用户格式。"""
 
 import json
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 from .constants import CONFIG_FILE
-from .logging_config import log
+from .storage import safe_name
+
+DEFAULT_INTERVAL_MINUTES = 20
 
 
-def load_config() -> dict:
-    """读取 config.json 并返回完整配置字典。"""
-    with open(CONFIG_FILE, encoding="utf-8") as f:
-        return json.load(f)
+class ConfigError(ValueError):
+    """配置文件缺失、字段错误或用户身份冲突。"""
 
 
-def load_users(cfg: dict) -> list[dict]:
-    """支持新 multi-user 格式（cfg.users[]）和旧 single-user 格式。
+def _mapping(value: Any, field: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ConfigError(f"配置字段 {field} 必须是对象")
+    return value
 
-    每个 user dict 必须含 name / jwxt / telegram。
-    """
+
+def _text(value: Any, field: str, *, strip: bool = True) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(f"配置字段 {field} 必须是非空字符串")
+    normalized = value.strip() if strip else value
+    if not normalized:
+        raise ConfigError(f"配置字段 {field} 必须是非空字符串")
+    return normalized
+
+
+def _chat_id(value: Any, field: str) -> str:
+    if isinstance(value, bool):
+        raise ConfigError(f"配置字段 {field} 必须是字符串或整数")
+    if isinstance(value, int):
+        return str(value)
+    return _text(value, field)
+
+
+def _normalize_user(raw: Any, index: int) -> dict:
+    prefix = f"users[{index}]"
+    user = _mapping(raw, prefix)
+    jwxt = _mapping(user.get("jwxt"), f"{prefix}.jwxt")
+    telegram = _mapping(user.get("telegram"), f"{prefix}.telegram")
+
+    username = _text(jwxt.get("username"), f"{prefix}.jwxt.username")
+    name_value = user.get("name", username)
+    name = _text(name_value, f"{prefix}.name")
+    if len(name) > 64:
+        raise ConfigError(f"配置字段 {prefix}.name 不能超过 64 个字符")
+
+    return {
+        "name": name,
+        "jwxt": {
+            "username": username,
+            # 密码的前后空格可能是有效字符，不做 strip。
+            "password": _text(
+                jwxt.get("password"), f"{prefix}.jwxt.password", strip=False,
+            ),
+        },
+        "telegram": {
+            "bot_token": _text(
+                telegram.get("bot_token"), f"{prefix}.telegram.bot_token",
+            ),
+            "chat_id": _chat_id(
+                telegram.get("chat_id"), f"{prefix}.telegram.chat_id",
+            ),
+        },
+    }
+
+
+def load_users(cfg: Mapping[str, Any]) -> list[dict]:
+    """返回经过复制和校验的用户列表，不修改传入配置。"""
     if "users" in cfg:
-        users = cfg["users"]
+        raw_users = cfg["users"]
+        if not isinstance(raw_users, list) or not raw_users:
+            raise ConfigError("配置字段 users 必须是非空数组")
     else:
-        # 旧版兼容：顶层 jwxt + telegram → 单用户
-        users = [{
-            "name": cfg["jwxt"]["username"],
-            "jwxt": cfg["jwxt"],
-            "telegram": cfg["telegram"],
-        }]
-    for u in users:
-        u.setdefault("name", u["jwxt"]["username"])
+        # 旧版：顶层 jwxt + telegram。
+        raw_users = [{"jwxt": cfg.get("jwxt"), "telegram": cfg.get("telegram")}]
+
+    users = [_normalize_user(raw, index) for index, raw in enumerate(raw_users)]
+
+    display_names: set[str] = set()
+    storage_names: set[str] = set()
+    for user in users:
+        display_key = user["name"].casefold()
+        storage_key = safe_name(user["name"]).casefold()
+        if display_key in display_names:
+            raise ConfigError(f"用户 name 重复: {user['name']}")
+        if storage_key in storage_names:
+            raise ConfigError(
+                f"用户 name 映射到同一缓存文件: {user['name']} "
+                f"({safe_name(user['name'])})",
+            )
+        display_names.add(display_key)
+        storage_names.add(storage_key)
+
     return users
+
+
+def _normalize_interval(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ConfigError("interval_minutes 必须是正整数")
+    if isinstance(value, float) and not value.is_integer():
+        raise ConfigError("interval_minutes 必须是正整数")
+    try:
+        interval = int(value)
+    except (TypeError, ValueError) as error:
+        raise ConfigError("interval_minutes 必须是正整数") from error
+    if interval <= 0:
+        raise ConfigError("interval_minutes 必须大于 0")
+    return interval
+
+
+def load_config(path: Path = CONFIG_FILE) -> dict:
+    """读取、规范化并校验配置；返回新的字典。"""
+    try:
+        with open(path, encoding="utf-8") as file:
+            raw = json.load(file)
+    except FileNotFoundError as error:
+        raise ConfigError(f"配置文件不存在: {path}") from error
+    except json.JSONDecodeError as error:
+        raise ConfigError(f"配置文件不是有效 JSON: {error}") from error
+
+    cfg = dict(_mapping(raw, "根节点"))
+    cfg["interval_minutes"] = _normalize_interval(
+        cfg.get("interval_minutes", DEFAULT_INTERVAL_MINUTES),
+    )
+    cfg["users"] = load_users(cfg)
+    return cfg

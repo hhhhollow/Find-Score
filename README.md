@@ -6,8 +6,9 @@
 - 发现新成绩或分数变更时，推一条带 **平时成绩 / 期末成绩 / 总成绩 / 学分** 的消息
 - 同时推送本学期 + 总平均分（按学分加权）
 - 支持多个学号（共用一个 bot 或各自的 chat 都行）
-- macOS launchd 调度：合盖睡眠时不跑，醒来再继续
+- macOS launchd / Linux systemd-user 后台服务
 - CAS cookie 持久化：会话能用就直接用，过期才登一次
+- 通知 outbox 续传：Telegram 部分失败时只重试未确认的消息
 
 ---
 
@@ -23,15 +24,20 @@ Find-Score/
 │   ├── config.py               配置加载 & 多用户兼容
 │   ├── crypto.py               AES 密码加密
 │   ├── session.py              教务系统 HTTP 会话
-│   ├── cache.py                成绩缓存 & 原子写文件
+│   ├── storage.py              原子 JSON 写入与运行时路径工具
+│   ├── cache.py                成绩缓存、outbox 与旧格式迁移
+│   ├── changes.py              纯函数式成绩快照差异计算
 │   ├── formatting.py           学期解析、成绩格式化、平均分
-│   ├── notify.py               Telegram 推送（带重试）
+│   ├── notify.py               Telegram + macOS/Linux 桌面通知
 │   ├── polling.py              单次轮询逻辑
-│   └── monitor.py              单用户处理 & 失败告警
+│   ├── monitor.py              单用户处理 & 失败告警
+│   ├── locking.py              macOS/Linux 单实例进程锁
+│   └── service.py              launchd/systemd-user 服务管理
 ├── run_monitor.py              顶层启动脚本
 ├── config.json                 你的账号 + Telegram 配置（git 忽略）
-├── requirements.txt            Python 依赖
-├── start.sh / stop.sh          启停 launchd
+├── pyproject.toml / uv.lock    项目元数据与锁定依赖
+├── tests/                      离线单元测试
+├── start.sh / stop.sh          跨平台后台服务启停
 ├── restart.sh / status.sh      重启 / 查状态
 ├── grade_monitor.log           运行日志（带 2MB 滚动）
 ├── grades_cache.<name>.json    每用户成绩缓存 + 失败状态（git 忽略）
@@ -39,17 +45,25 @@ Find-Score/
 └── .venv/                      Python 虚拟环境（git 忽略）
 ```
 
-LaunchAgent plist 在 `~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist`。
+后台定义由程序生成：
+
+- macOS：`~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist`
+- Linux：`${XDG_CONFIG_HOME:-~/.config}/systemd/user/find-score.service`
+
+运行时目录默认为包含 `config.json` 的源码根目录；使用已安装的 `find-score`
+命令时则为当前目录。可通过 `FIND_SCORE_HOME=/path/to/data` 显式指定
+`config.json`、缓存、cookies 和日志所在目录。
 
 ---
 
 ## 首次部署
 
-1. **建虚拟环境 + 装依赖**
+1. **建虚拟环境 + 装锁定依赖**
    ```bash
-   python3 -m venv .venv
-   .venv/bin/pip install -r requirements.txt
+   uv sync --frozen
    ```
+   项目支持 Python 3.10+；`.python-version` 仅将本地开发环境锁定在 3.13。
+   macOS 和 Linux 需要分别执行 `uv sync`，不要跨系统复制 `.venv`。
 
 2. **配 Telegram bot**
    - 找 [@BotFather](https://t.me/BotFather)，`/newbot` 创建一个，记下 `bot_token`
@@ -57,32 +71,53 @@ LaunchAgent plist 在 `~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist`�
    - 在新 bot 里给自己发条消息，激活会话（否则 bot 不能主动联系你）
 
 3. **写 `config.json`**（参考 `config.json` 模板，见下文"多用户配置"）
+   ```bash
+   chmod 600 config.json
+   ```
 
-4. **加载 launchd**
+4. **启动当前平台的后台服务**
    ```bash
    ./start.sh
    ```
-   会立刻跑一次（拉一遍现有成绩做基线，不推送），之后每 20 分钟自动触发。
+   会立刻跑一次（拉现有成绩做基线，仅发初始化通知，不逐条推送），之后按配置间隔轮询。
 
 ---
 
 ## 日常操作
 
 ```bash
-./status.sh    # 查状态（是否已加载、最近日志）
-./restart.sh   # 改代码 / 改 config 后重新加载
-./stop.sh      # 完全卸载
+./status.sh    # launchctl / systemctl --user 状态 + 最近日志
+./restart.sh   # 改代码 / 改 config 后重启
+./stop.sh      # 停止、禁用并删除当前用户服务定义
+```
+
+等价的 Python 命令：
+
+```bash
+uv run find-score-service start
+uv run find-score-service stop
+uv run find-score-service restart
+uv run find-score-service status
+uv run find-score-service render      # 只查看将生成的 plist / unit
 ```
 
 **手动跑一次**（不等 20 分钟）：
 ```bash
-.venv/bin/python -m grade_monitor
+uv run find-score
+# 等价：uv run python -m grade_monitor
 ```
 
-**用老的循环模式**（持续运行，不通过 launchd；调试用）：
+**循环模式**（持续运行，不通过系统服务；调试用）：
 ```bash
-.venv/bin/python -m grade_monitor loop
+uv run find-score loop
 ```
+
+### Linux 补充说明
+
+- 后台管理依赖 systemd user manager；不支持 systemd 的发行版可手动运行 loop 模式。
+- Telegram 在服务器/无桌面环境中仍正常工作。桌面通知需要可选的 `notify-send`。
+- systemd user service 默认跟随登录会话。如需未登录或注销后仍运行，由管理员显式执行
+  `loginctl enable-linger "$USER"`；Find-Score 不会自动修改该系统策略。
 
 ---
 
@@ -121,7 +156,7 @@ LaunchAgent plist 在 `~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist`�
 ```
 
 字段说明：
-- **`name`**：任意昵称，仅用于给缓存/cookies 文件命名和推送消息加前缀。两人不能重名
+- **`name`**：昵称（最多 64 字符），用于缓存/cookies 文件和推送前缀；不能重名或映射到同一文件名
 - **`jwxt.username`** / **`password`**：教务系统学号 + 密码
 - **`telegram.bot_token`** / **`chat_id`**：可以**两人共用一个 bot**（同一个 token），各自填自己的 `chat_id`；也可以完全独立
 - 推送格式：`🎓 [alice] 发现 X 条新成绩！`，前缀里的 `[name]` 让你能分清是谁的成绩
@@ -175,8 +210,9 @@ LaunchAgent plist 在 `~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist`�
 
 ```bash
 tail -f grade_monitor.log                 # 看实时日志
-.venv/bin/python -m grade_monitor         # 手动跑一次（看输出）
-rm grades_cache.<name>.json               # 清缓存 → 下次会把所有成绩当新的推一遍
+uv run find-score                         # 手动跑一次（看输出）
+uv run python -m unittest discover -s tests -v  # 跑离线测试
+rm grades_cache.<name>.json               # 清缓存 → 下次重建静默基线
 rm cookies.<name>.json                    # 清 cookies → 下次会重新登录
 ```
 
@@ -187,16 +223,21 @@ rm cookies.<name>.json                    # 清 cookies → 下次会重新登�
 | Telegram 收不到任何消息 | 1) `bot_token` / `chat_id` 配错；2) 没在 bot 里发过消息激活会话 |
 | 日志大量 SSL EOF | CAS 限流（一般是短时多次手动登录触发）。等 10-15 分钟，或换 IP（手机热点） |
 | 推送 `[name] 连续 N 次失败` | 真出问题了，检查日志末尾的具体异常 |
-| 缓存里出现没见过的字段 | 旧字段会在 load 时自动清掉，无需手动处理 |
+| 缓存里出现 `outbox` | 正常：用于续传尚未确认的 Telegram 消息，送达后会自动清空 |
 | 想换 20 分钟为其他间隔 | 编辑 `config.json` 的 `interval_minutes`，下一轮循环自动生效 |
+| Linux 提示无法连接 user bus | 确认在普通用户登录会话内执行，不要使用 `sudo systemctl --user` |
+| Linux 没有桌面弹窗 | 安装 `notify-send` 并确保有图形会话；不影响 Telegram |
+| 提示已有 Find-Score 进程 | 后台服务正在运行；单实例锁会防止并发查询和重复推送 |
 
 ---
 
-## 关于耗电 / 后台运行
+## 休眠 / 后台运行
 
-- **合盖断电不会跑**：launchd 不会唤醒电脑来执行任务（plist 未设 `WakeFromSleep`），睡眠期间错过的会合并为唤醒后追跑一次
-- **不插电开盖**会跑：每次 ~5 秒 CPU + 10KB 流量，可忽略
-- **KeepAlive 自动重启**：进程异常退出后 launchd 会自动重启，间隔至少 60 秒
+- **锁屏或仅显示器熄灭**：系统没有 suspend，macOS 和 Linux 都会继续查询。
+- **合盖、suspend、hibernate**：两端都不查询、不联网，也不会由 Find-Score 唤醒机器。
+- **唤醒后**：分段墙钟等待会在最多约 30 秒内合并补查一轮，不会按错过轮数突发请求。
+- **异常退出**：launchd/systemd-user 会自动重启，节流间隔为 60 秒。
+- 单次查询约占用数秒 CPU 和少量网络流量。
 
 ---
 
@@ -209,11 +250,15 @@ grade_monitor/
 ├── config.py            配置文件读取
 ├── crypto.py            AES-CBC 密码加密
 ├── session.py           JwxtSession（CAS 登录 + API 调用）
-├── cache.py             成绩缓存（原子写入 + 旧格式迁移）
+├── storage.py           原子 JSON 写入与安全文件名
+├── cache.py             成绩快照 + 通知 outbox + 旧格式迁移
+├── changes.py           纯成绩差异计算
 ├── formatting.py        学期解析 + 成绩格式化 + 加权平均
-├── notify.py            Telegram 推送
-├── polling.py           单次轮询（对比缓存 → 推送变更）
-├── monitor.py           用户处理 + 失败告警
+├── notify.py            Telegram + macOS/Linux 通知适配器
+├── polling.py           查询 → 差异 → outbox 投递编排
+├── monitor.py           单用户边界、状态落盘与失败告警
+├── locking.py           POSIX 进程级单实例锁
+├── service.py           launchd/systemd-user 定义与生命周期
 └── __main__.py          CLI 入口
 ```
 

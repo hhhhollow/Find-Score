@@ -1,6 +1,11 @@
-"""
-北京信息科技大学 教务系统成绩监控
-CAS 统一认证 → scores API → Telegram 推送
-"""
+"""北京信息科技大学教务系统成绩监控。"""
 
-__version__ = "2.0.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("find-score")
+except PackageNotFoundError:
+    # 直接从未安装的源码目录运行时没有包元数据。
+    __version__ = "0+unknown"
+
+__all__ = ["__version__"]

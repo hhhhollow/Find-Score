@@ -2,10 +2,27 @@
 学期解析、成绩格式化、加权平均分计算。
 """
 
+import math
 import re
+from html import escape
 
 _YEAR_NAMES = ["大一", "大二", "大三", "大四", "大五", "大六", "大七"]
 _SEM_NAMES = {"1": "第一学期", "2": "第二学期", "3": "小学期"}
+_MAX_MESSAGE_FIELD_LENGTH = 512
+
+
+def escape_message_text(value, limit: int = _MAX_MESSAGE_FIELD_LENGTH) -> str:
+    """转义 Telegram HTML 动态文本，并按转义后长度安全截断。"""
+    pieces: list[str] = []
+    length = 0
+    for character in str(value):
+        encoded = escape(character, quote=False)
+        if length + len(encoded) > limit - 1:
+            pieces.append("…")
+            break
+        pieces.append(encoded)
+        length += len(encoded)
+    return "".join(pieces)
 
 
 def parse_entry_year(student_id: str) -> int:
@@ -34,7 +51,8 @@ def _to_float(v) -> float | None:
     if v is None or v == "":
         return None
     try:
-        return float(str(v).strip())
+        value = float(str(v).strip())
+        return value if math.isfinite(value) else None
     except (ValueError, TypeError):
         return None
 
@@ -63,17 +81,20 @@ def format_grade(g: dict, entry_year: int,
     usual = g.get("usualScore")
     final = g.get("finalScore")
 
-    lines = [f"<b>{name}</b>"]
+    def html(value) -> str:
+        return escape_message_text(value)
+
+    lines = [f"<b>{html(name)}</b>"]
     if term:
-        lines.append(f"学期：{format_term(term, entry_year)}")
-    if usual:
-        lines.append(f"平时成绩：{usual}")
-    if final:
-        lines.append(f"期末成绩：{final}")
+        lines.append(f"学期：{html(format_term(term, entry_year))}")
+    if usual not in (None, ""):
+        lines.append(f"平时成绩：{html(usual)}")
+    if final not in (None, ""):
+        lines.append(f"期末成绩：{html(final)}")
     if old_score is not None:
-        lines.append(f"总成绩：<s>{old_score}</s> → <b>{score}</b>")
+        lines.append(f"总成绩：<s>{html(old_score)}</s> → <b>{html(score)}</b>")
     else:
-        lines.append(f"总成绩：{score}")
-    if credit:
-        lines.append(f"学分：{credit}")
+        lines.append(f"总成绩：{html(score)}")
+    if credit not in (None, ""):
+        lines.append(f"学分：{html(credit)}")
     return "\n".join(lines)

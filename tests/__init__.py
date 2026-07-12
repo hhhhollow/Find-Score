@@ -1,0 +1,1 @@
+"""Find-Score test suite."""

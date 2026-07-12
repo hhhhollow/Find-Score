@@ -2,10 +2,29 @@
 路径常量、URL 端点、全局配置。
 """
 
+import os
+from collections.abc import Mapping
 from pathlib import Path
 
+
+def resolve_runtime_dir(
+    package_root: Path,
+    cwd: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> Path:
+    """解析配置和状态目录，兼容源码运行与已安装 CLI。"""
+    environment = os.environ if environ is None else environ
+    configured = environment.get("FIND_SCORE_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    source_root = package_root.resolve()
+    if (source_root / "config.json").is_file():
+        return source_root
+    return (Path.cwd() if cwd is None else cwd).resolve()
+
 # ── 路径 ──────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).parent.parent.resolve()   # Find-Score/
+BASE_DIR = resolve_runtime_dir(Path(__file__).parent.parent)
 CONFIG_FILE = BASE_DIR / "config.json"
 GRADES_CACHE_FILE = BASE_DIR / "grades_cache.json"  # 旧版兼容，迁移用
 LOG_FILE = BASE_DIR / "grade_monitor.log"

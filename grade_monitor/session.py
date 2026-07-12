@@ -4,12 +4,13 @@
 
 import json
 import re
+from collections.abc import Mapping
+from pathlib import Path
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .cache import atomic_write_json
 from .constants import (
     CAS_CAPTCHA_CHECK,
     CAS_HOST,
@@ -23,12 +24,15 @@ from .constants import (
 )
 from .crypto import encrypt_password
 from .logging_config import log
-
-from pathlib import Path
+from .storage import atomic_write_json
 
 
 class SessionExpired(Exception):
     """检测到会话失效，需要重新登录。"""
+
+
+class ApiError(RuntimeError):
+    """教务系统返回了可解析但业务失败的响应。"""
 
 
 def _build_session() -> requests.Session:
@@ -64,6 +68,15 @@ class JwxtSession:
         })
         if cookies_path and cookies_path.exists():
             self._load_cookies()
+
+    def close(self) -> None:
+        self.session.close()
+
+    def __enter__(self) -> "JwxtSession":
+        return self
+
+    def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
+        self.close()
 
     # ── Cookies 持久化 ────────────────────────────────────────────────────
 
@@ -231,7 +244,10 @@ class JwxtSession:
         ctype = r.headers.get("Content-Type", "")
         if "json" not in ctype.lower():
             raise SessionExpired(f"非 JSON 响应 ({ctype})")
-        return r.json()
+        payload = r.json()
+        if not isinstance(payload, dict):
+            raise ApiError("API 响应顶层必须是对象")
+        return payload
 
     def fetch_all_grades(self) -> list[dict]:
         """拉所有成绩，字段规范化后返回。"""
@@ -239,10 +255,14 @@ class JwxtSession:
             CXWDCJ_URL, {"pageSize": "200", "pageNumber": "1"},
         )
         if data.get("code") != "0":
-            return []
-        rows = (
-            (data.get("datas") or {}).get("cxwdcj") or {}
-        ).get("rows") or []
+            raise ApiError(f"成绩列表接口失败 (code={data.get('code', '?')})")
+        datas = data.get("datas")
+        result = datas.get("cxwdcj") if isinstance(datas, dict) else None
+        if not isinstance(result, dict) or not isinstance(result.get("rows"), list):
+            raise ApiError("成绩列表接口响应缺少 datas.cxwdcj.rows")
+        rows = result["rows"]
+        if not all(isinstance(row, Mapping) for row in rows):
+            raise ApiError("成绩列表接口 rows 必须全部是对象")
         return [
             {
                 "_termCode": row.get("XNXQDM", ""),
@@ -263,5 +283,15 @@ class JwxtSession:
             return {}
         data = self._post_json(DETAILS_URL, {"WID": wid})
         if data.get("code") != "0":
-            return {}
-        return (data.get("datas") or {}).get("details") or {}
+            raise ApiError(f"成绩详情接口失败 (code={data.get('code', '?')})")
+        datas = data.get("datas")
+        details = datas.get("details") if isinstance(datas, dict) else None
+        if not isinstance(details, dict):
+            raise ApiError("成绩详情接口响应缺少 datas.details")
+        item_scores = details.get("itemScores")
+        if item_scores is not None and (
+            not isinstance(item_scores, list)
+            or not all(isinstance(item, Mapping) for item in item_scores)
+        ):
+            raise ApiError("成绩详情接口 itemScores 必须是对象数组")
+        return details

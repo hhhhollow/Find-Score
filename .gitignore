@@ -1,7 +1,9 @@
 # === 敏感配置 & 运行时数据 ===
 config.json
+grades_cache.json
 grades_cache.*.json
 cookies.*.json
+.grade_monitor.lock
 
 # === 日志文件 ===
 *.log
