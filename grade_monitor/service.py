@@ -78,15 +78,23 @@ def _systemd_quote(value: str, *, escape_dollar: bool = False) -> str:
     return f'"{escaped}"'
 
 
-def render_launchd_plist(context: ServiceContext) -> str:
-    """生成不经 shell 的 LaunchAgent plist。"""
+def render_launchd_plist(
+    context: ServiceContext,
+    interval_minutes: int,
+) -> str:
+    """生成由 launchd 定时触发一次性查询的 LaunchAgent plist。"""
+    if isinstance(interval_minutes, bool) or not isinstance(interval_minutes, int):
+        raise ServiceError("launchd 轮询间隔必须是正整数分钟")
+    if interval_minutes <= 0:
+        raise ServiceError("launchd 轮询间隔必须大于 0")
+
     payload = {
         "Label": LAUNCHD_LABEL,
         "ProgramArguments": [
             str(context.python_executable),
             "-m",
             "grade_monitor",
-            "loop",
+            "once",
         ],
         "WorkingDirectory": str(context.runtime_dir),
         "EnvironmentVariables": {
@@ -94,8 +102,7 @@ def render_launchd_plist(context: ServiceContext) -> str:
             "PYTHONUNBUFFERED": "1",
         },
         "RunAtLoad": True,
-        "KeepAlive": True,
-        "ThrottleInterval": 60,
+        "StartInterval": interval_minutes * 60,
         "ProcessType": "Background",
         "ExitTimeOut": 30,
         "Umask": 0o077,
@@ -145,9 +152,15 @@ def render_systemd_unit(context: ServiceContext) -> str:
     )
 
 
-def render_definition(context: ServiceContext) -> str:
+def render_definition(
+    context: ServiceContext,
+    *,
+    interval_minutes: int | None = None,
+) -> str:
     if context.system == "Darwin":
-        return render_launchd_plist(context)
+        if interval_minutes is None:
+            raise ServiceError("生成 launchd 定义时缺少 interval_minutes")
+        return render_launchd_plist(context, interval_minutes)
     if context.system == "Linux":
         return render_systemd_unit(context)
     raise ServiceError(f"不支持的操作系统: {context.system}")
@@ -176,7 +189,7 @@ def _invoke(
     return result
 
 
-def _validate_start(context: ServiceContext) -> None:
+def _validate_start(context: ServiceContext) -> dict:
     if context.system not in {"Darwin", "Linux"}:
         raise ServiceError(f"不支持的操作系统: {context.system}")
     if not context.python_executable.is_file():
@@ -184,7 +197,7 @@ def _validate_start(context: ServiceContext) -> None:
     for path in (context.runtime_dir, context.python_executable, context.definition_path):
         if any(character in str(path) for character in ("\x00", "\n", "\r")):
             raise ServiceError(f"路径不能包含 NUL 或换行: {path}")
-    load_config(context.runtime_dir / "config.json")
+    return load_config(context.runtime_dir / "config.json")
 
 
 def _launchd_target(context: ServiceContext) -> str:
@@ -206,7 +219,7 @@ def start_service(
     runner: Runner = subprocess.run,
 ) -> Path:
     """安装（或更新）定义并启动服务。"""
-    _validate_start(context)
+    config = _validate_start(context)
     definition_path = context.definition_path
     launchd_loaded = False
     if context.system == "Darwin":
@@ -218,7 +231,14 @@ def start_service(
             ["systemctl", "--user", "show-environment"],
             capture_output=True,
         )
-    atomic_write_text(definition_path, render_definition(context), mode=0o644)
+    atomic_write_text(
+        definition_path,
+        render_definition(
+            context,
+            interval_minutes=config["interval_minutes"],
+        ),
+        mode=0o644,
+    )
 
     if context.system == "Darwin":
         target = _launchd_target(context)
@@ -276,7 +296,7 @@ def service_status(
     context: ServiceContext,
     runner: Runner = subprocess.run,
 ) -> int:
-    """显示原生服务状态；运行中返回 0，否则返回 3。"""
+    """显示原生服务状态；已加载返回 0，否则返回 3。"""
     if context.system == "Darwin":
         result = _invoke(
             runner,
@@ -296,12 +316,14 @@ def service_status(
     if result.stdout:
         print(result.stdout.rstrip())
     if result.returncode == 0:
+        if context.system == "Darwin":
+            print("✅ launchd 定时任务已加载（两轮之间 not running 属于正常状态）")
         return 0
     definition_exists = context.definition_path.exists()
     if definition_exists:
-        print("⚠️ 后台服务已安装，但当前未运行")
+        print("⚠️ 后台任务定义存在，但当前未加载")
     else:
-        print("🛑 后台服务未安装或未运行")
+        print("🛑 后台任务未安装或未加载")
     if definition_exists and result.stderr:
         print(result.stderr.rstrip(), file=sys.stderr)
     return 3
@@ -326,19 +348,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         context = create_context()
         if args.action == "render":
-            print(render_definition(context), end="")
+            interval_minutes = None
+            if context.system == "Darwin":
+                config = load_config(context.runtime_dir / "config.json")
+                interval_minutes = config["interval_minutes"]
+            print(
+                render_definition(
+                    context,
+                    interval_minutes=interval_minutes,
+                ),
+                end="",
+            )
             return 0
         if args.action == "start":
             path = start_service(context)
-            print(f"✅ 后台服务已启动: {path}")
+            print(f"✅ 后台任务已安装并加载: {path}")
             return 0
         if args.action == "restart":
             path = start_service(context)
-            print(f"🔄 后台服务已重启: {path}")
+            print(f"🔄 后台任务已重新加载: {path}")
             return 0
         if args.action == "stop":
             stop_service(context)
-            print("🛑 后台服务已停止并禁用")
+            print("🛑 后台任务已停止并禁用")
             return 0
 
         code = service_status(context)

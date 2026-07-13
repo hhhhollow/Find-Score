@@ -5,6 +5,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -73,21 +75,32 @@ class ServiceRenderingTests(unittest.TestCase):
             uid=501,
         )
 
-    def test_launchd_definition_uses_argv_and_no_wake_directives(self) -> None:
+    def test_launchd_definition_runs_once_on_configured_interval(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             context = self.context(Path(directory), "Darwin")
-            definition = plistlib.loads(render_launchd_plist(context).encode())
+            definition = plistlib.loads(render_launchd_plist(context, 5).encode())
 
         self.assertEqual(definition["Label"], LAUNCHD_LABEL)
         self.assertEqual(
             definition["ProgramArguments"],
-            [str(Path(sys.executable)), "-m", "grade_monitor", "loop"],
+            [str(Path(sys.executable)), "-m", "grade_monitor", "once"],
         )
         self.assertEqual(definition["WorkingDirectory"], str(context.runtime_dir))
         self.assertEqual(definition["EnvironmentVariables"]["FIND_SCORE_HOME"], str(context.runtime_dir))
-        self.assertTrue(definition["KeepAlive"])
-        self.assertNotIn("StartInterval", definition)
+        self.assertTrue(definition["RunAtLoad"])
+        self.assertEqual(definition["StartInterval"], 300)
+        self.assertNotIn("KeepAlive", definition)
+        self.assertNotIn("ThrottleInterval", definition)
         self.assertNotIn("StartCalendarInterval", definition)
+
+    def test_launchd_definition_rejects_invalid_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = self.context(Path(directory), "Darwin")
+
+            for value in (0, -1, True, 1.5, "5"):
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(ServiceError, "轮询间隔"):
+                        render_launchd_plist(context, value)  # type: ignore[arg-type]
 
     def test_systemd_definition_quotes_paths_and_has_no_timer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -116,6 +129,8 @@ class ServiceRenderingTests(unittest.TestCase):
         exec_line = next(line for line in unit.splitlines() if line.startswith("ExecStart="))
         self.assertNotIn("$" * 2, working_line)
         self.assertIn("$" * 2, exec_line)
+        self.assertIn('"loop"', exec_line)
+        self.assertNotIn('"once"', exec_line)
         self.assertNotIn("OnCalendar", unit)
         self.assertNotIn("WakeSystem", unit)
 
@@ -176,6 +191,10 @@ class ServiceLifecycleTests(unittest.TestCase):
             self.assertNotIn("secret", definition)
             self.assertNotIn("token", definition)
             self.assertNotIn("20240001", definition)
+            payload = plistlib.loads(definition.encode("utf-8"))
+            self.assertEqual(payload["StartInterval"], 300)
+            self.assertEqual(payload["ProgramArguments"][-1], "once")
+            self.assertNotIn("KeepAlive", payload)
             self.assertEqual(runner.commands[0][:2], ["launchctl", "print"])
             self.assertIn(["launchctl", "enable", f"gui/501/{LAUNCHD_LABEL}"], runner.commands)
             self.assertTrue(any(command[:2] == ["launchctl", "bootstrap"] for command in runner.commands))
@@ -234,6 +253,22 @@ class ServiceLifecycleTests(unittest.TestCase):
 
         self.assertEqual(main(["start"]), 0)
         start.assert_called_once_with(create.return_value)
+
+    @patch("grade_monitor.service.create_context")
+    def test_service_cli_render_uses_configured_launchd_interval(self, create) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = self.make_context(Path(directory), "Darwin")
+            create.return_value = context
+            output = StringIO()
+
+            with redirect_stdout(output):
+                code = main(["render"])
+
+        self.assertEqual(code, 0)
+        payload = plistlib.loads(output.getvalue().encode("utf-8"))
+        self.assertEqual(payload["StartInterval"], 300)
+        self.assertEqual(payload["ProgramArguments"][-1], "once")
+        self.assertNotIn("KeepAlive", payload)
 
 
 if __name__ == "__main__":

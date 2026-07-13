@@ -6,7 +6,7 @@
 - 发现新成绩或分数变更时，推一条带 **平时成绩 / 期末成绩 / 总成绩 / 学分** 的消息
 - 同时推送本学期 + 总平均分（按学分加权）
 - 支持多个学号（共用一个 bot 或各自的 chat 都行）
-- macOS launchd / Linux systemd-user 后台服务
+- macOS launchd 定时任务 / Linux systemd-user 后台服务
 - CAS cookie 持久化：会话能用就直接用，过期才登一次
 - 通知 outbox 续传：Telegram 部分失败时只重试未确认的消息
 
@@ -48,7 +48,11 @@ Find-Score/
 后台定义由程序生成：
 
 - macOS：`~/Library/LaunchAgents/com.hhhhollow.gradeMonitor.plist`
+  - `RunAtLoad` 载入时立即执行一次
+  - `StartInterval` 按 `interval_minutes` 周期启动 `find-score once`
+  - 每轮查询结束后 Python 进程退出，不使用 `KeepAlive` 常驻
 - Linux：`${XDG_CONFIG_HOME:-~/.config}/systemd/user/find-score.service`
+  - systemd-user 常驻运行 `find-score loop`
 
 运行时目录默认为包含 `config.json` 的源码根目录；使用已安装的 `find-score`
 命令时则为当前目录。可通过 `FIND_SCORE_HOME=/path/to/data` 显式指定
@@ -79,7 +83,8 @@ Find-Score/
    ```bash
    ./start.sh
    ```
-   会立刻跑一次（拉现有成绩做基线，仅发初始化通知，不逐条推送），之后按配置间隔轮询。
+   会立刻跑一次（拉现有成绩做基线，仅发初始化通知，不逐条推送）。之后 macOS
+   由 launchd 按配置间隔启动一次性查询，Linux 由常驻循环按配置间隔轮询。
 
 ---
 
@@ -87,7 +92,7 @@ Find-Score/
 
 ```bash
 ./status.sh    # launchctl / systemctl --user 状态 + 最近日志
-./restart.sh   # 改代码 / 改 config 后重启
+./restart.sh   # 改代码 / 改 config 后重新加载；macOS 改轮询间隔后必须执行
 ./stop.sh      # 停止、禁用并删除当前用户服务定义
 ```
 
@@ -111,6 +116,15 @@ uv run find-score
 ```bash
 uv run find-score loop
 ```
+
+### macOS 补充说明
+
+- `interval_minutes` 会被写入 LaunchAgent 的 `StartInterval`；修改后必须执行
+  `./restart.sh`，重新生成并加载 plist。
+- launchd 只在查询时启动 Python。两轮之间 `launchctl print` 显示
+  `state = not running` 是正常状态，表示定时任务已加载但当前没有查询进程。
+- LaunchAgent 属于当前用户的图形登录会话；注销期间不运行，再次登录后会因
+  `RunAtLoad` 立即查询一次。
 
 ### Linux 补充说明
 
@@ -224,19 +238,20 @@ rm cookies.<name>.json                    # 清 cookies → 下次会重新登�
 | 日志大量 SSL EOF | CAS 限流（一般是短时多次手动登录触发）。等 10-15 分钟，或换 IP（手机热点） |
 | 推送 `[name] 连续 N 次失败` | 真出问题了，检查日志末尾的具体异常 |
 | 缓存里出现 `outbox` | 正常：用于续传尚未确认的 Telegram 消息，送达后会自动清空 |
-| 想换 20 分钟为其他间隔 | 编辑 `config.json` 的 `interval_minutes`，下一轮循环自动生效 |
+| 想换 20 分钟为其他间隔 | 编辑 `config.json` 的 `interval_minutes`；macOS 还需执行 `./restart.sh`，Linux 下一轮自动生效 |
 | Linux 提示无法连接 user bus | 确认在普通用户登录会话内执行，不要使用 `sudo systemctl --user` |
 | Linux 没有桌面弹窗 | 安装 `notify-send` 并确保有图形会话；不影响 Telegram |
-| 提示已有 Find-Score 进程 | 后台服务正在运行；单实例锁会防止并发查询和重复推送 |
+| 提示已有 Find-Score 进程 | 另一轮定时或手动查询正在执行；单实例锁会防止并发查询和重复推送 |
 
 ---
 
 ## 休眠 / 后台运行
 
-- **锁屏或仅显示器熄灭**：系统没有 suspend，macOS 和 Linux 都会继续查询。
+- **锁屏或仅显示器熄灭**：系统没有 suspend，macOS 会继续按间隔启动查询，Linux 常驻循环也会继续查询。
 - **合盖、suspend、hibernate**：两端都不查询、不联网，也不会由 Find-Score 唤醒机器。
-- **唤醒后**：分段墙钟等待会在最多约 30 秒内合并补查一轮，不会按错过轮数突发请求。
-- **异常退出**：launchd/systemd-user 会自动重启，节流间隔为 60 秒。
+- **唤醒后**：macOS `StartInterval` 在休眠期间错过的触发不会补跑，需等待下一个间隔；Linux 常驻循环会在最多约 30 秒内补查一轮。
+- **异常退出**：macOS 单次查询失败后等待下一次定时；Linux systemd-user 会在 60 秒后重启常驻进程。
+- macOS 平时没有驻留的 Python 进程；Linux 保持一个低资源占用的常驻进程。
 - 单次查询约占用数秒 CPU 和少量网络流量。
 
 ---
@@ -258,7 +273,7 @@ grade_monitor/
 ├── polling.py           查询 → 差异 → outbox 投递编排
 ├── monitor.py           单用户边界、状态落盘与失败告警
 ├── locking.py           POSIX 进程级单实例锁
-├── service.py           launchd/systemd-user 定义与生命周期
+├── service.py           launchd 定时任务/systemd-user 服务定义与生命周期
 └── __main__.py          CLI 入口
 ```
 
