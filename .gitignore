@@ -4,6 +4,7 @@ grades_cache.json
 grades_cache.*.json
 cookies.*.json
 .grade_monitor.lock
+.grade_monitor_state.json
 
 # === 日志文件 ===
 *.log

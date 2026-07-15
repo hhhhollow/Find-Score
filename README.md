@@ -40,6 +40,7 @@ Find-Score/
 ├── start.sh / stop.sh          跨平台后台服务启停
 ├── restart.sh / status.sh      重启 / 查状态
 ├── grade_monitor.log           运行日志（带 2MB 滚动）
+├── .grade_monitor_state.json   跨进程查询轮次（git 忽略）
 ├── grades_cache.<name>.json    每用户成绩缓存 + 失败状态（git 忽略）
 ├── cookies.<name>.json         每用户持久化 cookies（git 忽略）
 └── .venv/                      Python 虚拟环境（git 忽略）

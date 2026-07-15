@@ -11,6 +11,7 @@ from .config import ConfigError, DEFAULT_INTERVAL_MINUTES, load_config
 from .locking import InstanceAlreadyRunning, instance_lock
 from .logging_config import configure_logging, log
 from .monitor import process_user
+from .rounds import next_round_number
 
 _start_time: float | None = None
 
@@ -53,7 +54,7 @@ def _run_round(users: list[dict], round_number: int) -> bool:
 def run_once() -> bool:
     """加载一次配置，跑完所有用户后退出。"""
     cfg = load_config()
-    return _run_round(cfg["users"], 1)
+    return _run_round(cfg["users"], next_round_number())
 
 
 def _sleep_until(deadline: float, max_chunk_seconds: float = 30) -> None:
@@ -69,18 +70,15 @@ def run_loop() -> None:
     """每轮重读配置，配置变更在下一轮生效。"""
     global _start_time
     _start_time = time.time()
-    round_number = 0
-
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
     log.info(f"🚀 [服务启动] 成绩监控服务已启动 (PID {os.getpid()})")
 
     while True:
-        round_number += 1
         interval_seconds = DEFAULT_INTERVAL_MINUTES * 60
         try:
             cfg = load_config()
-            _run_round(cfg["users"], round_number)
+            _run_round(cfg["users"], next_round_number())
             interval_seconds = cfg["interval_minutes"] * 60
         except Exception as error:
             log.error(f"循环异常: {type(error).__name__}: {error}", exc_info=True)

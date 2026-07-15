@@ -28,6 +28,15 @@ class CliTests(unittest.TestCase):
     def test_once_success_returns_zero(self, _run, _lock, _umask, _logging) -> None:
         self.assertEqual(main(["once"]), 0)
 
+    @patch("grade_monitor.__main__._run_round", return_value=True)
+    @patch("grade_monitor.__main__.next_round_number", return_value=42)
+    @patch("grade_monitor.__main__.load_config", return_value={"users": [{"name": "a"}]})
+    def test_once_uses_persistent_round_number(self, _config, _number, run) -> None:
+        from grade_monitor.__main__ import run_once
+
+        self.assertTrue(run_once())
+        run.assert_called_once_with([{"name": "a"}], 42)
+
     @patch("grade_monitor.__main__.configure_logging")
     @patch("grade_monitor.__main__.os.umask")
     def test_second_instance_returns_distinct_exit_code(self, _umask, _logging) -> None:

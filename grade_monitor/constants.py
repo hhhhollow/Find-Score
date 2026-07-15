@@ -28,6 +28,7 @@ BASE_DIR = resolve_runtime_dir(Path(__file__).parent.parent)
 CONFIG_FILE = BASE_DIR / "config.json"
 GRADES_CACHE_FILE = BASE_DIR / "grades_cache.json"  # 旧版兼容，迁移用
 LOG_FILE = BASE_DIR / "grade_monitor.log"
+MONITOR_STATE_FILE = BASE_DIR / ".grade_monitor_state.json"
 
 # ── CAS 认证 ─────────────────────────────────────────────────────────────────
 CAS_HOST = "https://wxjw.bistu.edu.cn"
