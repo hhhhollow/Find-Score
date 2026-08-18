@@ -4,6 +4,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from .constants import CONFIG_FILE
 from .storage import safe_name
@@ -38,6 +39,47 @@ def _chat_id(value: Any, field: str) -> str:
     return _text(value, field)
 
 
+def _bark_server(value: Any, field: str) -> str:
+    """校验 Bark 服务地址，禁止非 HTTP(S)、凭据、查询参数和 fragment。"""
+    server = _text(value, field).rstrip("/")
+    parsed = urlsplit(server)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ConfigError(f"配置字段 {field} 必须是有效的 http/https URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ConfigError(f"配置字段 {field} 不能在 URL 中包含用户名或密码")
+    if parsed.query or parsed.fragment:
+        raise ConfigError(f"配置字段 {field} 不能包含 query 或 fragment")
+    return server
+
+
+def _bark_key(value: Any, field: str) -> str:
+    key = _text(value, field).strip("/")
+    if not key or any(character in key for character in "/?#"):
+        raise ConfigError(f"配置字段 {field} 必须是单段 Bark key")
+    return key
+
+
+def _bark_from_url(value: str, field: str) -> dict[str, str]:
+    """把 https://host[/prefix]/key 拆成 server + key，并保持可选路径前缀。"""
+    raw = _text(value, field).rstrip("/")
+    parsed = urlsplit(raw)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ConfigError(f"配置字段 {field} 必须是有效的 http/https Bark URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ConfigError(f"配置字段 {field} 不能在 URL 中包含用户名或密码")
+    if parsed.query or parsed.fragment:
+        raise ConfigError(f"配置字段 {field} 不能包含 query 或 fragment")
+
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if not path_parts:
+        raise ConfigError(f"配置字段 {field} 的 URL 必须包含 Bark key")
+
+    key = _bark_key(path_parts[-1], f"{field}.key")
+    prefix = "/" + "/".join(path_parts[:-1]) if len(path_parts) > 1 else ""
+    server = urlunsplit((parsed.scheme, parsed.netloc, prefix, "", "")).rstrip("/")
+    return {"key": key, "server": server}
+
+
 def _normalize_user(raw: Any, index: int) -> dict:
     prefix = f"users[{index}]"
     user = _mapping(raw, prefix)
@@ -65,23 +107,22 @@ def _normalize_user(raw: Any, index: int) -> dict:
     if has_bark:
         bark_val = user.get("bark")
         if isinstance(bark_val, str):
-            bark_str = _text(bark_val, f"{prefix}.bark")
-            if "://" in bark_str:
-                parts = bark_str.rstrip("/").split("/")
-                bark_dict = {
-                    "key": parts[-1],
-                    "server": "/".join(parts[:-1]),
-                }
-            else:
-                bark_dict = {"key": bark_str, "server": "https://api.day.app"}
+            bark_dict = _bark_from_url(bark_val, f"{prefix}.bark")
         elif isinstance(bark_val, Mapping):
-            key = _text(bark_val.get("key"), f"{prefix}.bark.key")
-            server = bark_val.get("server", "https://api.day.app")
+            key = _bark_key(bark_val.get("key"), f"{prefix}.bark.key")
+            server = _bark_server(
+                bark_val.get("server", "https://api.day.app"),
+                f"{prefix}.bark.server",
+            )
             bark_dict = {
                 "key": key,
-                "server": _text(server, f"{prefix}.bark.server").rstrip("/"),
-                "sound": bark_val.get("sound", "bell"),
-                "group": bark_val.get("group", "Find-Score"),
+                "server": server,
+                "sound": _text(
+                    bark_val.get("sound", "bell"), f"{prefix}.bark.sound",
+                ),
+                "group": _text(
+                    bark_val.get("group", "Find-Score"), f"{prefix}.bark.group",
+                ),
             }
         else:
             raise ConfigError(f"配置字段 {prefix}.bark 必须是字符串或对象")
