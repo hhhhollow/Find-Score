@@ -7,9 +7,15 @@ Grade = dict[str, Any]
 
 
 def grade_cache_key(grade: Mapping[str, Any]) -> str:
-    """生成稳定的成绩缓存键：学期代码|课程号。"""
-    term = grade.get("_termCode", "")
-    course = grade.get("courseNo", grade.get("courseName", ""))
+    """生成稳定的成绩缓存键：学期代码 + 最可靠的课程标识。"""
+    term = str(grade.get("_termCode") or "").strip()
+    course_no = str(grade.get("courseNo") or "").strip()
+    wid = str(grade.get("WID") or "").strip()
+    course_name = str(grade.get("courseName") or "").strip()
+
+    # 教务接口偶尔可能返回空 KCH。旧实现只在 courseNo 字段不存在时
+    # 才回退到课程名，因此多个空 KCH 记录会全部碰撞到 "term|"。
+    course = course_no or wid or course_name
     return f"{term}|{course}"
 
 
