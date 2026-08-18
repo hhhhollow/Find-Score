@@ -4,6 +4,7 @@ import platform
 import shutil
 import subprocess
 import time
+from urllib.parse import quote, urlsplit
 
 import requests
 
@@ -177,6 +178,18 @@ def build_messages(
     return messages
 
 
+def _valid_bark_server(server: str) -> str | None:
+    clean_server = server.strip().rstrip("/")
+    parsed = urlsplit(clean_server)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if parsed.query or parsed.fragment:
+        return None
+    return clean_server
+
+
 def send_bark(
     key: str,
     text: str,
@@ -186,13 +199,19 @@ def send_bark(
     sound: str = "bell",
     retries: int = 3,
 ) -> bool:
-    """发送 Bark (iOS) 通知；仅重试服务端和网络错误。"""
+    """发送 Bark (iOS) 通知；拒绝重定向，避免把成绩转发到意外主机。"""
     import html
     import re
 
-    clean_server = server.rstrip("/")
+    clean_server = _valid_bark_server(server)
     clean_key = key.strip("/")
-    url = f"{clean_server}/{clean_key}/"
+    if clean_server is None or not clean_key:
+        log.error("Bark 推送配置无效")
+        return False
+
+    # key 作为单个 URL path segment 编码，避免特殊字符改变请求目标路径。
+    encoded_key = quote(clean_key, safe="")
+    url = f"{clean_server}/{encoded_key}/"
     plain_text = html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
     plain_title = html.unescape(re.sub(r"<[^>]+>", "", title)).strip()
 
@@ -206,7 +225,12 @@ def send_bark(
     for attempt in range(max(0, retries)):
         wait = 2**attempt
         try:
-            response = requests.post(url, json=payload, timeout=15)
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=15,
+                allow_redirects=False,
+            )
             if 200 <= response.status_code < 300:
                 try:
                     result = response.json()
@@ -215,6 +239,11 @@ def send_bark(
                 if isinstance(result, dict) and result.get("code") == 200:
                     return True
                 detail = f"HTTP {response.status_code} 响应未包含 code=200"
+            elif 300 <= response.status_code < 400:
+                log.error(
+                    f"Bark 推送被拒绝：服务端返回重定向 (HTTP {response.status_code})",
+                )
+                return False
             elif 400 <= response.status_code < 500:
                 log.error(f"Bark 推送被拒绝 (HTTP {response.status_code})")
                 return False
@@ -287,4 +316,3 @@ def send_batch(
         if not send_telegram(bot_token, chat_id, message):
             return False
     return True
-
