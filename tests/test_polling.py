@@ -20,7 +20,7 @@ def grade(score: str = "90") -> dict:
 
 def state(score: str = "80") -> dict:
     return {
-        "version": 2,
+        "version": 3,
         "initialized": True,
         "scores": {"2024-2025-1|MATH101": score},
         "outbox": None,
@@ -158,6 +158,61 @@ class PollingTests(unittest.TestCase):
                 self.assertEqual(
                     final["scores"]["2024-2025-1|MATH101"], "90",
                 )
+                self.assertIsNone(final["outbox"])
+
+    @patch("grade_monitor.polling.send_local_notification")
+    @patch("grade_monitor.polling.send_bark", side_effect=[False, True])
+    @patch("grade_monitor.polling.send_telegram", return_value=True)
+    def test_multi_channel_resume_does_not_repeat_successful_channel(
+        self, telegram, bark, local,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grades_cache.user.json"
+            with patch("grade_monitor.cache.cache_path_for", return_value=path):
+                cache = state()
+                cache["scores"] = {}
+                cache["initialized"] = False
+                channels = {
+                    "telegram": {"bot_token": "token", "chat_id": "chat"},
+                    "bark": {"key": "key"},
+                }
+
+                def checkpoint() -> None:
+                    save_cache("user", cache)
+
+                first = poll_once(
+                    FakeClient([grade()]),
+                    cache,
+                    channels=channels,
+                    entry_year=2024,
+                    user_name="user",
+                    checkpoint=checkpoint,
+                )
+
+                self.assertFalse(first)
+                persisted = load_cache("user", migrate_legacy=False)
+                self.assertEqual(
+                    persisted["outbox"]["delivered_channels"],
+                    ["telegram"],
+                )
+                self.assertFalse(persisted["initialized"])
+
+                cache = persisted
+                second = poll_once(
+                    FakeClient([grade()]),
+                    cache,
+                    channels=channels,
+                    entry_year=2024,
+                    user_name="user",
+                    checkpoint=checkpoint,
+                )
+
+                self.assertTrue(second)
+                self.assertEqual(telegram.call_count, 1)
+                self.assertEqual(bark.call_count, 2)
+                local.assert_not_called()
+                final = load_cache("user", migrate_legacy=False)
+                self.assertTrue(final["initialized"])
                 self.assertIsNone(final["outbox"])
 
     @patch("grade_monitor.polling.send_telegram")

@@ -23,27 +23,44 @@ from .session import JwxtSession, SessionExpired
 Checkpoint = Callable[[], None]
 
 
-def _send_channel_message(channels: dict, text: str, user_name: str) -> bool:
-    """向已配置的渠道发送通知；任一渠道成功即返回 True。"""
-    if not channels:
-        return False
-    delivered = False
+def _configured_channel_names(channels: dict) -> list[str]:
+    names: list[str] = []
     telegram_cfg = channels.get("telegram")
-    if isinstance(telegram_cfg, dict) and telegram_cfg.get("bot_token") and telegram_cfg.get("chat_id"):
-        if send_telegram(telegram_cfg["bot_token"], telegram_cfg["chat_id"], text):
-            delivered = True
+    if (
+        isinstance(telegram_cfg, dict)
+        and telegram_cfg.get("bot_token")
+        and telegram_cfg.get("chat_id")
+    ):
+        names.append("telegram")
     bark_cfg = channels.get("bark")
     if isinstance(bark_cfg, dict) and bark_cfg.get("key"):
-        if send_bark(
-            key=bark_cfg["key"],
+        names.append("bark")
+    return names
+
+
+def _send_channel(channels: dict, channel: str, text: str, user_name: str) -> bool:
+    """只向指定渠道发送一次，供 outbox 做逐渠道确认。"""
+    if channel == "telegram":
+        cfg = channels.get("telegram")
+        if not isinstance(cfg, dict):
+            return False
+        return send_telegram(cfg["bot_token"], cfg["chat_id"], text)
+
+    if channel == "bark":
+        cfg = channels.get("bark")
+        if not isinstance(cfg, dict):
+            return False
+        return send_bark(
+            key=cfg["key"],
             text=text,
             title=f"🎓 [{user_name}] 成绩提醒",
-            server=bark_cfg.get("server", "https://api.day.app"),
-            group=bark_cfg.get("group", "Find-Score"),
-            sound=bark_cfg.get("sound", "bell"),
-        ):
-            delivered = True
-    return delivered
+            server=cfg.get("server", "https://api.day.app"),
+            group=cfg.get("group", "Find-Score"),
+            sound=cfg.get("sound", "bell"),
+        )
+
+    log.error(f"未知通知渠道: {channel}")
+    return False
 
 
 def _enrich_with_item_scores(client: JwxtSession, grade: dict) -> None:
@@ -130,7 +147,7 @@ def _build_change_messages(
     entry_year: int,
     user_name: str,
 ) -> list[str]:
-    """把一次变更渲染成可逐条确认的 Telegram outbox。"""
+    """把一次变更渲染成可逐条确认的远端通知 outbox。"""
     tag = f"[{user_name}]"
     who = f"<b>[{escape(user_name, quote=False)}]</b>"
     messages: list[str] = []
@@ -176,15 +193,21 @@ def _queue_outbox(
     messages: list[str],
     target_scores: dict[str, str],
     target_initialized: bool,
+    channels: dict,
     checkpoint: Checkpoint | None,
 ) -> None:
-    """在发送前持久化待投递消息和其对应的目标快照。"""
+    """发送前持久化消息、目标快照以及本轮必须确认的通知渠道。"""
     if not messages:
         raise ValueError("不能创建空通知 outbox")
+    required_channels = _configured_channel_names(channels)
+    if not required_channels:
+        raise ValueError("没有有效的远端通知渠道")
     cache["outbox"] = {
         "messages": list(messages),
         "target_scores": dict(target_scores),
         "target_initialized": target_initialized,
+        "required_channels": required_channels,
+        "delivered_channels": [],
     }
     _checkpoint(checkpoint)
 
@@ -196,7 +219,7 @@ def _flush_outbox(
     user_name_or_checkpoint: Any = None,
     checkpoint: Checkpoint | None = None,
 ) -> bool:
-    """逐条发送并确认 outbox；失败时保留尚未确认的消息。"""
+    """逐消息、逐渠道确认 outbox；只重试尚未确认的渠道。"""
     if isinstance(channels_or_token, dict):
         channels = channels_or_token
         user_name = chat_id_or_user or "default"
@@ -218,20 +241,81 @@ def _flush_outbox(
     messages = outbox.get("messages")
     target_scores = outbox.get("target_scores")
     target_initialized = outbox.get("target_initialized")
+    required_channels = outbox.get("required_channels")
+    delivered_channels = outbox.get("delivered_channels", [])
     if (
         not isinstance(messages, list)
         or not messages
         or not isinstance(target_scores, dict)
         or not isinstance(target_initialized, bool)
+        or (
+            required_channels is not None
+            and not (
+                isinstance(required_channels, list)
+                and required_channels
+                and all(isinstance(channel, str) and channel for channel in required_channels)
+            )
+        )
+        or not isinstance(delivered_channels, list)
+        or not all(isinstance(channel, str) and channel for channel in delivered_channels)
     ):
         log.error("通知 outbox 状态无效")
         return False
 
-    while messages:
-        if not _send_channel_message(channels, messages[0], user_name):
+    active_channels = _configured_channel_names(channels)
+    if required_channels is None:
+        if not active_channels:
+            log.error("通知 outbox 无可用远端渠道")
             return False
+        required_channels = list(active_channels)
+        delivered_channels = []
+        outbox["required_channels"] = required_channels
+        outbox["delivered_channels"] = delivered_channels
+        _checkpoint(real_checkpoint)
+    else:
+        # 配置变更时，已移除的旧渠道不应永久阻塞历史 outbox；新加渠道则只接收
+        # 之后新建的 outbox，避免收到配置前的旧消息。
+        retained = [
+            channel for channel in required_channels
+            if channel in active_channels
+        ]
+        if not retained and active_channels:
+            retained = list(active_channels)
+            delivered_channels = []
+        else:
+            delivered_channels = [
+                channel for channel in delivered_channels
+                if channel in retained
+            ]
+        if retained != required_channels or delivered_channels != outbox.get("delivered_channels"):
+            required_channels = retained
+            outbox["required_channels"] = required_channels
+            outbox["delivered_channels"] = delivered_channels
+            _checkpoint(real_checkpoint)
+
+    if not required_channels:
+        log.error("通知 outbox 所需渠道均不可用")
+        return False
+
+    while messages:
+        failed = False
+        for channel in required_channels:
+            if channel in delivered_channels:
+                continue
+            if _send_channel(channels, channel, messages[0], user_name):
+                delivered_channels.append(channel)
+                outbox["delivered_channels"] = delivered_channels
+                _checkpoint(real_checkpoint)
+            else:
+                failed = True
+
+        if failed:
+            return False
+
         if len(messages) > 1:
             del messages[0]
+            delivered_channels = []
+            outbox["delivered_channels"] = delivered_channels
         else:
             cache["scores"] = dict(target_scores)
             cache["initialized"] = target_initialized
@@ -275,7 +359,7 @@ def poll_once(
     channels: dict | None = None,
     checkpoint: Checkpoint | None = None,
 ) -> bool:
-    """执行一次轮询；可靠消息确认后才提交其对应的成绩快照。"""
+    """执行一次轮询；所有目标渠道确认后才提交其对应的成绩快照。"""
     if channels is not None:
         active_channels = channels
     else:
@@ -315,7 +399,18 @@ def poll_once(
             f"🎉 {who} 成绩监控已初始化，已缓存 {len(grades)} 门课程，"
             f"后续有新成绩将自动通知！",
         ]
-        _queue_outbox(cache, messages, changes.scores, True, checkpoint)
+        try:
+            _queue_outbox(
+                cache,
+                messages,
+                changes.scores,
+                True,
+                active_channels,
+                checkpoint,
+            )
+        except ValueError as error:
+            log.error(f"{tag} 无法创建初始化通知: {error}")
+            return False
         if not _flush_outbox(cache, active_channels, user_name, checkpoint):
             log.error(f"{tag} 初始化通知失败，已进入 outbox 等待下轮重试")
             return False
@@ -338,11 +433,18 @@ def poll_once(
 
     try:
         messages = _build_change_messages(changes, grades, entry_year, user_name)
+        _queue_outbox(
+            cache,
+            messages,
+            changes.scores,
+            True,
+            active_channels,
+            checkpoint,
+        )
     except ValueError as error:
-        log.error(f"{tag} 通知内容无法分批: {error}")
+        log.error(f"{tag} 通知内容无法入队: {error}")
         return False
-    _queue_outbox(cache, messages, changes.scores, True, checkpoint)
-    # 本地通知是 best-effort，不必等待 Telegram outbox 全部确认。
+    # 本地通知是 best-effort，不必等待远端 outbox 全部确认。
     _send_local_change_messages(changes, user_name)
     if not _flush_outbox(cache, active_channels, user_name, checkpoint):
         log.error(f"{tag} 通知未全部送达，已保留 outbox 供下轮续传")

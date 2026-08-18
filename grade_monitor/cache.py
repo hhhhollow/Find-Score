@@ -2,10 +2,16 @@
 
 缓存结构（每用户一个 JSON 文件）：
 {
-  "version": 2,
+  "version": 3,
   "initialized": bool,
   "scores": {"term|courseNo": "分数"},
-  "outbox": null | {"messages": [...], "target_scores": {...}},
+  "outbox": null | {
+      "messages": [...],
+      "target_scores": {...},
+      "target_initialized": bool,
+      "required_channels": null | [...],
+      "delivered_channels": [...]
+  },
   "failure": {"streak": int, "first_failure_ts": float|None, "alert_sent": bool}
 }
 """
@@ -20,7 +26,7 @@ from .constants import BASE_DIR, GRADES_CACHE_FILE
 from .logging_config import log
 from .storage import atomic_write_json, safe_name
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 
 
 def cache_path_for(user_name: str) -> Path:
@@ -35,6 +41,17 @@ def _empty_state() -> dict:
         "outbox": None,
         "failure": {"streak": 0, "first_failure_ts": None, "alert_sent": False},
     }
+
+
+def _string_list(value: object, *, allow_empty: bool = True) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    if not allow_empty and not value:
+        return None
+    if not all(isinstance(item, str) and item for item in value):
+        return None
+    # 保序去重，避免损坏状态导致同一渠道被重复发送。
+    return list(dict.fromkeys(value))
 
 
 def _normalize_state(data: object, path: Path) -> dict:
@@ -85,13 +102,35 @@ def _normalize_state(data: object, path: Path) -> dict:
         messages = raw_outbox.get("messages")
         target_scores = raw_outbox.get("target_scores")
         target_initialized = raw_outbox.get("target_initialized")
+        required_channels_raw = raw_outbox.get("required_channels")
+        delivered_channels_raw = raw_outbox.get("delivered_channels", [])
+
+        required_channels = None
+        if required_channels_raw is not None:
+            required_channels = _string_list(
+                required_channels_raw,
+                allow_empty=False,
+            )
+        delivered_channels = _string_list(delivered_channels_raw)
+
         if (
             isinstance(messages, list)
             and messages
             and all(isinstance(message, str) and message for message in messages)
             and isinstance(target_scores, dict)
             and isinstance(target_initialized, bool)
+            and (
+                required_channels_raw is None
+                or required_channels is not None
+            )
+            and delivered_channels is not None
         ):
+            if required_channels is not None:
+                delivered_channels = [
+                    channel
+                    for channel in delivered_channels
+                    if channel in required_channels
+                ]
             outbox = {
                 "messages": list(messages),
                 "target_scores": {
@@ -99,6 +138,9 @@ def _normalize_state(data: object, path: Path) -> dict:
                     for key, value in target_scores.items()
                 },
                 "target_initialized": target_initialized,
+                # 旧版 outbox 没有渠道字段；首次 flush 时再绑定当前配置。
+                "required_channels": required_channels,
+                "delivered_channels": delivered_channels,
             }
         else:
             log.warning(f"{path.name} 的 outbox 类型无效，将重新生成通知")

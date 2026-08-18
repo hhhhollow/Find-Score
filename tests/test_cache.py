@@ -43,6 +43,31 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(normalized["scores"], {"course": "90"})
         self.assertIsNone(normalized["outbox"])
 
+    def test_old_outbox_gains_channel_tracking_fields(self) -> None:
+        normalized = cache._normalize_state(
+            {
+                "initialized": True,
+                "scores": {"course": "80"},
+                "outbox": {
+                    "messages": ["message"],
+                    "target_scores": {"course": "90"},
+                    "target_initialized": True,
+                },
+            },
+            Path("old.json"),
+        )
+
+        self.assertIsNone(normalized["outbox"]["required_channels"])
+        self.assertEqual(normalized["outbox"]["delivered_channels"], [])
+
+    def test_saved_cache_has_private_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grades_cache.user.json"
+            with patch.object(cache, "cache_path_for", return_value=path):
+                cache.save_cache("user", cache._empty_state())
+
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

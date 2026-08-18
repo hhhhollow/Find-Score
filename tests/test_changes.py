@@ -1,6 +1,6 @@
 import unittest
 
-from grade_monitor.changes import detect_changes
+from grade_monitor.changes import detect_changes, grade_cache_key
 
 
 def grade(course: str, score: str, term: str = "2024-2025-1") -> dict:
@@ -36,6 +36,26 @@ class DetectChangesTests(unittest.TestCase):
         )
 
         self.assertFalse(changes.has_changes)
+
+    def test_blank_course_number_falls_back_to_wid(self) -> None:
+        value = {
+            "_termCode": "2024-2025-1",
+            "courseNo": "",
+            "courseName": "高等数学",
+            "WID": "wid-123",
+        }
+
+        self.assertEqual(grade_cache_key(value), "2024-2025-1|wid-123")
+
+    def test_blank_course_number_and_wid_fall_back_to_name(self) -> None:
+        value = {
+            "_termCode": "2024-2025-1",
+            "courseNo": "   ",
+            "courseName": " 高等数学 ",
+            "WID": "",
+        }
+
+        self.assertEqual(grade_cache_key(value), "2024-2025-1|高等数学")
 
 
 if __name__ == "__main__":
