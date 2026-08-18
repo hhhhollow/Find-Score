@@ -43,6 +43,14 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(normalized["scores"], {"course": "90"})
         self.assertIsNone(normalized["outbox"])
 
+    def test_saved_cache_has_private_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "grades_cache.user.json"
+            with patch.object(cache, "cache_path_for", return_value=path):
+                cache.save_cache("user", cache._empty_state())
+
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()
