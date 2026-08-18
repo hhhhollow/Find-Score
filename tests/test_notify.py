@@ -5,6 +5,7 @@ from unittest.mock import patch
 from grade_monitor.notify import (
     build_local_notification_command,
     build_messages,
+    send_bark,
     send_batch,
     send_local_notification,
     send_telegram,
@@ -109,18 +110,44 @@ class NotifyTests(unittest.TestCase):
         return_value=_Response(200, {"code": 200, "message": "success"}),
     )
     def test_bark_success_requires_code_200(self, mocked_post) -> None:
-        from grade_monitor.notify import send_bark
         self.assertTrue(send_bark("testkey", "hello", retries=1))
-        mocked_post.assert_called_once()
+        mocked_post.assert_called_once_with(
+            "https://api.day.app/testkey/",
+            json={
+                "title": "Find-Score",
+                "body": "hello",
+                "group": "Find-Score",
+                "sound": "bell",
+            },
+            timeout=15,
+            allow_redirects=False,
+        )
 
     @patch(
         "grade_monitor.notify.requests.post",
         return_value=_Response(200, {"code": 500, "message": "failed"}),
     )
     def test_bark_failure_on_non_200_code(self, mocked_post) -> None:
-        from grade_monitor.notify import send_bark
         self.assertFalse(send_bark("testkey", "hello", retries=1))
         mocked_post.assert_called_once()
+
+    @patch("grade_monitor.notify.requests.post", return_value=_Response(307))
+    def test_bark_redirect_is_rejected_without_retry(self, mocked_post) -> None:
+        self.assertFalse(send_bark("testkey", "hello", retries=3))
+        mocked_post.assert_called_once()
+
+    @patch("grade_monitor.notify.requests.post", return_value=_Response(200, {"code": 200}))
+    def test_bark_key_is_encoded_as_single_path_segment(self, mocked_post) -> None:
+        self.assertTrue(send_bark("a/b?c", "hello", retries=1))
+        self.assertEqual(
+            mocked_post.call_args.args[0],
+            "https://api.day.app/a%2Fb%3Fc/",
+        )
+
+    @patch("grade_monitor.notify.requests.post")
+    def test_bark_rejects_non_http_server_before_request(self, mocked_post) -> None:
+        self.assertFalse(send_bark("key", "hello", server="file:///tmp", retries=1))
+        mocked_post.assert_not_called()
 
     @patch("grade_monitor.notify.send_bark", return_value=True)
     @patch("grade_monitor.notify.send_telegram", return_value=False)
