@@ -14,6 +14,14 @@ def user(name: str = "alice") -> dict:
     }
 
 
+def bark_user(bark) -> dict:
+    return {
+        "name": "bob",
+        "jwxt": {"username": "20240002", "password": "pwd"},
+        "bark": bark,
+    }
+
+
 class ConfigTests(unittest.TestCase):
     def test_load_config_normalizes_interval_and_copies_users(self) -> None:
         raw = {"interval_minutes": "15", "users": [user()]}
@@ -74,26 +82,49 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(normalized["jwxt"]["password"], "  secret  ")
         self.assertEqual(normalized["telegram"]["chat_id"], "123")
 
-
     def test_supports_bark_notification_config(self) -> None:
-        bark_user = {
-            "name": "bob",
-            "jwxt": {"username": "20240002", "password": "pwd"},
-            "bark": {"key": "mykey", "sound": "bell"},
-        }
-        normalized = load_users({"users": [bark_user]})[0]
+        normalized = load_users({
+            "users": [bark_user({"key": "mykey", "sound": "bell"})],
+        })[0]
+
         self.assertIn("bark", normalized)
         self.assertEqual(normalized["bark"]["key"], "mykey")
         self.assertEqual(normalized["bark"]["server"], "https://api.day.app")
 
     def test_supports_bark_url_string(self) -> None:
-        bark_user = {
-            "name": "charlie",
-            "jwxt": {"username": "20240003", "password": "pwd"},
-            "bark": "https://api.day.app/mykey/",
-        }
-        normalized = load_users({"users": [bark_user]})[0]
+        normalized = load_users({
+            "users": [bark_user("https://api.day.app/mykey/")],
+        })[0]
+
         self.assertEqual(normalized["bark"]["key"], "mykey")
+        self.assertEqual(normalized["bark"]["server"], "https://api.day.app")
+
+    def test_bark_url_preserves_server_path_prefix(self) -> None:
+        normalized = load_users({
+            "users": [bark_user("https://push.example.com/bark/mykey")],
+        })[0]
+
+        self.assertEqual(normalized["bark"]["key"], "mykey")
+        self.assertEqual(normalized["bark"]["server"], "https://push.example.com/bark")
+
+    def test_rejects_bark_url_without_key(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "必须包含 Bark key"):
+            load_users({"users": [bark_user("https://api.day.app")]})
+
+    def test_rejects_non_http_bark_server(self) -> None:
+        with self.assertRaisesRegex(ConfigError, "http/https"):
+            load_users({
+                "users": [bark_user({"key": "mykey", "server": "file:///tmp"})],
+            })
+
+    def test_rejects_bark_url_credentials_and_query(self) -> None:
+        for value in (
+            "https://user:pass@example.com/key",
+            "https://example.com/key?redirect=https://evil.example",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(ConfigError):
+                    load_users({"users": [bark_user(value)]})
 
 
 if __name__ == "__main__":
