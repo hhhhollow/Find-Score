@@ -75,5 +75,26 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(normalized["telegram"]["chat_id"], "123")
 
 
+    def test_supports_bark_notification_config(self) -> None:
+        bark_user = {
+            "name": "bob",
+            "jwxt": {"username": "20240002", "password": "pwd"},
+            "bark": {"key": "mykey", "sound": "bell"},
+        }
+        normalized = load_users({"users": [bark_user]})[0]
+        self.assertIn("bark", normalized)
+        self.assertEqual(normalized["bark"]["key"], "mykey")
+        self.assertEqual(normalized["bark"]["server"], "https://api.day.app")
+
+    def test_supports_bark_url_string(self) -> None:
+        bark_user = {
+            "name": "charlie",
+            "jwxt": {"username": "20240003", "password": "pwd"},
+            "bark": "https://api.day.app/mykey/",
+        }
+        normalized = load_users({"users": [bark_user]})[0]
+        self.assertEqual(normalized["bark"]["key"], "mykey")
+
+
 if __name__ == "__main__":
     unittest.main()

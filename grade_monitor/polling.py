@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from html import escape
+from typing import Any
 
 from .changes import ChangeSet, GradeUpdate, detect_changes
 from .formatting import (
@@ -11,10 +12,38 @@ from .formatting import (
     format_term,
 )
 from .logging_config import log
-from .notify import build_messages, send_local_notification, send_telegram
+from .notify import (
+    build_messages,
+    send_bark,
+    send_local_notification,
+    send_telegram,
+)
 from .session import JwxtSession, SessionExpired
 
 Checkpoint = Callable[[], None]
+
+
+def _send_channel_message(channels: dict, text: str, user_name: str) -> bool:
+    """向已配置的渠道发送通知；任一渠道成功即返回 True。"""
+    if not channels:
+        return False
+    delivered = False
+    telegram_cfg = channels.get("telegram")
+    if isinstance(telegram_cfg, dict) and telegram_cfg.get("bot_token") and telegram_cfg.get("chat_id"):
+        if send_telegram(telegram_cfg["bot_token"], telegram_cfg["chat_id"], text):
+            delivered = True
+    bark_cfg = channels.get("bark")
+    if isinstance(bark_cfg, dict) and bark_cfg.get("key"):
+        if send_bark(
+            key=bark_cfg["key"],
+            text=text,
+            title=f"🎓 [{user_name}] 成绩提醒",
+            server=bark_cfg.get("server", "https://api.day.app"),
+            group=bark_cfg.get("group", "Find-Score"),
+            sound=bark_cfg.get("sound", "bell"),
+        ):
+            delivered = True
+    return delivered
 
 
 def _enrich_with_item_scores(client: JwxtSession, grade: dict) -> None:
@@ -162,11 +191,26 @@ def _queue_outbox(
 
 def _flush_outbox(
     cache: dict,
-    bot_token: str,
-    chat_id: str,
-    checkpoint: Checkpoint | None,
+    channels_or_token: Any,
+    chat_id_or_user: str = "",
+    user_name_or_checkpoint: Any = None,
+    checkpoint: Checkpoint | None = None,
 ) -> bool:
     """逐条发送并确认 outbox；失败时保留尚未确认的消息。"""
+    if isinstance(channels_or_token, dict):
+        channels = channels_or_token
+        user_name = chat_id_or_user or "default"
+        real_checkpoint = user_name_or_checkpoint if callable(user_name_or_checkpoint) else checkpoint
+    else:
+        channels = {
+            "telegram": {
+                "bot_token": channels_or_token,
+                "chat_id": chat_id_or_user,
+            }
+        }
+        user_name = "default"
+        real_checkpoint = user_name_or_checkpoint if callable(user_name_or_checkpoint) else checkpoint
+
     outbox = cache.get("outbox")
     if not isinstance(outbox, dict):
         return True
@@ -184,7 +228,7 @@ def _flush_outbox(
         return False
 
     while messages:
-        if not send_telegram(bot_token, chat_id, messages[0]):
+        if not _send_channel_message(channels, messages[0], user_name):
             return False
         if len(messages) > 1:
             del messages[0]
@@ -192,7 +236,7 @@ def _flush_outbox(
             cache["scores"] = dict(target_scores)
             cache["initialized"] = target_initialized
             cache["outbox"] = None
-        _checkpoint(checkpoint)
+        _checkpoint(real_checkpoint)
         if cache.get("outbox") is None:
             break
 
@@ -223,20 +267,31 @@ def _send_local_change_messages(changes: ChangeSet, user_name: str) -> None:
 def poll_once(
     client: JwxtSession,
     cache: dict,
-    bot_token: str,
-    chat_id: str,
-    entry_year: int,
+    bot_token: str = "",
+    chat_id: str = "",
+    entry_year: int = 0,
     user_name: str = "default",
     *,
+    channels: dict | None = None,
     checkpoint: Checkpoint | None = None,
 ) -> bool:
     """执行一次轮询；可靠消息确认后才提交其对应的成绩快照。"""
+    if channels is not None:
+        active_channels = channels
+    else:
+        active_channels = {
+            "telegram": {
+                "bot_token": bot_token,
+                "chat_id": chat_id,
+            }
+        }
+
     tag = f"[{user_name}]"
     who = f"<b>[{escape(user_name, quote=False)}]</b>"
 
     if cache.get("outbox") is not None:
         log.info(f"{tag} 继续投递上轮未完成的通知")
-        if not _flush_outbox(cache, bot_token, chat_id, checkpoint):
+        if not _flush_outbox(cache, active_channels, user_name, checkpoint):
             log.error(f"{tag} 通知仍未全部送达，下轮继续重试")
             return False
 
@@ -261,7 +316,7 @@ def poll_once(
             f"后续有新成绩将自动通知！",
         ]
         _queue_outbox(cache, messages, changes.scores, True, checkpoint)
-        if not _flush_outbox(cache, bot_token, chat_id, checkpoint):
+        if not _flush_outbox(cache, active_channels, user_name, checkpoint):
             log.error(f"{tag} 初始化通知失败，已进入 outbox 等待下轮重试")
             return False
         log.info(f"{tag} 首次运行，已缓存 {len(grades)} 条成绩（不逐条通知）")
@@ -289,7 +344,7 @@ def poll_once(
     _queue_outbox(cache, messages, changes.scores, True, checkpoint)
     # 本地通知是 best-effort，不必等待 Telegram outbox 全部确认。
     _send_local_change_messages(changes, user_name)
-    if not _flush_outbox(cache, bot_token, chat_id, checkpoint):
+    if not _flush_outbox(cache, active_channels, user_name, checkpoint):
         log.error(f"{tag} 通知未全部送达，已保留 outbox 供下轮续传")
         return False
     return True

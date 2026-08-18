@@ -42,7 +42,49 @@ def _normalize_user(raw: Any, index: int) -> dict:
     prefix = f"users[{index}]"
     user = _mapping(raw, prefix)
     jwxt = _mapping(user.get("jwxt"), f"{prefix}.jwxt")
-    telegram = _mapping(user.get("telegram"), f"{prefix}.telegram")
+
+    has_telegram = "telegram" in user and user["telegram"] is not None
+    has_bark = "bark" in user and user["bark"] is not None
+
+    if not has_telegram and not has_bark:
+        raise ConfigError(f"配置字段 {prefix} 必须包含 telegram 或 bark 通知配置")
+
+    telegram_dict = None
+    if has_telegram:
+        telegram = _mapping(user.get("telegram"), f"{prefix}.telegram")
+        telegram_dict = {
+            "bot_token": _text(
+                telegram.get("bot_token"), f"{prefix}.telegram.bot_token",
+            ),
+            "chat_id": _chat_id(
+                telegram.get("chat_id"), f"{prefix}.telegram.chat_id",
+            ),
+        }
+
+    bark_dict = None
+    if has_bark:
+        bark_val = user.get("bark")
+        if isinstance(bark_val, str):
+            bark_str = _text(bark_val, f"{prefix}.bark")
+            if "://" in bark_str:
+                parts = bark_str.rstrip("/").split("/")
+                bark_dict = {
+                    "key": parts[-1],
+                    "server": "/".join(parts[:-1]),
+                }
+            else:
+                bark_dict = {"key": bark_str, "server": "https://api.day.app"}
+        elif isinstance(bark_val, Mapping):
+            key = _text(bark_val.get("key"), f"{prefix}.bark.key")
+            server = bark_val.get("server", "https://api.day.app")
+            bark_dict = {
+                "key": key,
+                "server": _text(server, f"{prefix}.bark.server").rstrip("/"),
+                "sound": bark_val.get("sound", "bell"),
+                "group": bark_val.get("group", "Find-Score"),
+            }
+        else:
+            raise ConfigError(f"配置字段 {prefix}.bark 必须是字符串或对象")
 
     username = _text(jwxt.get("username"), f"{prefix}.jwxt.username")
     name_value = user.get("name", username)
@@ -50,7 +92,7 @@ def _normalize_user(raw: Any, index: int) -> dict:
     if len(name) > 64:
         raise ConfigError(f"配置字段 {prefix}.name 不能超过 64 个字符")
 
-    return {
+    normalized_user: dict[str, Any] = {
         "name": name,
         "jwxt": {
             "username": username,
@@ -59,15 +101,13 @@ def _normalize_user(raw: Any, index: int) -> dict:
                 jwxt.get("password"), f"{prefix}.jwxt.password", strip=False,
             ),
         },
-        "telegram": {
-            "bot_token": _text(
-                telegram.get("bot_token"), f"{prefix}.telegram.bot_token",
-            ),
-            "chat_id": _chat_id(
-                telegram.get("chat_id"), f"{prefix}.telegram.chat_id",
-            ),
-        },
     }
+    if telegram_dict is not None:
+        normalized_user["telegram"] = telegram_dict
+    if bark_dict is not None:
+        normalized_user["bark"] = bark_dict
+
+    return normalized_user
 
 
 def load_users(cfg: Mapping[str, Any]) -> list[dict]:
@@ -77,8 +117,12 @@ def load_users(cfg: Mapping[str, Any]) -> list[dict]:
         if not isinstance(raw_users, list) or not raw_users:
             raise ConfigError("配置字段 users 必须是非空数组")
     else:
-        # 旧版：顶层 jwxt + telegram。
-        raw_users = [{"jwxt": cfg.get("jwxt"), "telegram": cfg.get("telegram")}]
+        # 旧版：顶层 jwxt + telegram/bark。
+        raw_users = [{
+            "jwxt": cfg.get("jwxt"),
+            "telegram": cfg.get("telegram"),
+            "bark": cfg.get("bark"),
+        }]
 
     users = [_normalize_user(raw, index) for index, raw in enumerate(raw_users)]
 

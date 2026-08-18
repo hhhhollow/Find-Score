@@ -104,10 +104,37 @@ class NotifyTests(unittest.TestCase):
         self.assertTrue(send_telegram("token", "chat", "hello", retries=1))
         mocked_post.assert_called_once()
 
-    @patch("grade_monitor.notify.requests.post", return_value=_Response(200, {"ok": False}))
-    def test_unconfirmed_2xx_is_not_acknowledged(self, mocked_post) -> None:
-        self.assertFalse(send_telegram("token", "chat", "hello", retries=1))
+    @patch(
+        "grade_monitor.notify.requests.post",
+        return_value=_Response(200, {"code": 200, "message": "success"}),
+    )
+    def test_bark_success_requires_code_200(self, mocked_post) -> None:
+        from grade_monitor.notify import send_bark
+        self.assertTrue(send_bark("testkey", "hello", retries=1))
         mocked_post.assert_called_once()
+
+    @patch(
+        "grade_monitor.notify.requests.post",
+        return_value=_Response(200, {"code": 500, "message": "failed"}),
+    )
+    def test_bark_failure_on_non_200_code(self, mocked_post) -> None:
+        from grade_monitor.notify import send_bark
+        self.assertFalse(send_bark("testkey", "hello", retries=1))
+        mocked_post.assert_called_once()
+
+    @patch("grade_monitor.notify.send_bark", return_value=True)
+    @patch("grade_monitor.notify.send_telegram", return_value=False)
+    def test_notification_channels_success_if_any_channel_succeeds(
+        self, mocked_telegram, mocked_bark,
+    ) -> None:
+        from grade_monitor.notify import send_notification_channels
+        channels = {
+            "telegram": {"bot_token": "token", "chat_id": "123"},
+            "bark": {"key": "testkey"},
+        }
+        self.assertTrue(send_notification_channels(channels, "<b>msg</b>"))
+        mocked_telegram.assert_called_once()
+        mocked_bark.assert_called_once()
 
 
 if __name__ == "__main__":

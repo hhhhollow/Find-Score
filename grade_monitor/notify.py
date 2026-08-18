@@ -177,6 +177,100 @@ def build_messages(
     return messages
 
 
+def send_bark(
+    key: str,
+    text: str,
+    title: str = "Find-Score",
+    server: str = "https://api.day.app",
+    group: str = "Find-Score",
+    sound: str = "bell",
+    retries: int = 3,
+) -> bool:
+    """发送 Bark (iOS) 通知；仅重试服务端和网络错误。"""
+    import html
+    import re
+
+    clean_server = server.rstrip("/")
+    clean_key = key.strip("/")
+    url = f"{clean_server}/{clean_key}/"
+    plain_text = html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+    plain_title = html.unescape(re.sub(r"<[^>]+>", "", title)).strip()
+
+    payload = {
+        "title": plain_title,
+        "body": plain_text,
+        "group": group,
+        "sound": sound,
+    }
+
+    for attempt in range(max(0, retries)):
+        wait = 2**attempt
+        try:
+            response = requests.post(url, json=payload, timeout=15)
+            if 200 <= response.status_code < 300:
+                try:
+                    result = response.json()
+                except Exception:
+                    result = None
+                if isinstance(result, dict) and result.get("code") == 200:
+                    return True
+                detail = f"HTTP {response.status_code} 响应未包含 code=200"
+            elif 400 <= response.status_code < 500:
+                log.error(f"Bark 推送被拒绝 (HTTP {response.status_code})")
+                return False
+            else:
+                detail = f"HTTP {response.status_code}"
+        except Exception as error:
+            detail = type(error).__name__
+
+        if attempt + 1 < retries:
+            log.warning(
+                f"Bark 推送失败 (尝试 {attempt + 1}/{retries}, {detail})，"
+                f"{wait}s 后重试",
+            )
+            time.sleep(wait)
+
+    log.error("Bark 推送最终失败")
+    return False
+
+
+def send_notification_channels(
+    channels: dict,
+    text: str,
+    title: str = "Find-Score",
+) -> bool:
+    """分发通知到所有已配置的远端通知渠道（Bark、Telegram 等）。
+    只要至少一个有效配置的渠道发送成功，即返回 True。
+    """
+    if not channels:
+        return False
+
+    delivered_any = False
+
+    bark_cfg = channels.get("bark")
+    if isinstance(bark_cfg, dict) and bark_cfg.get("key"):
+        if send_bark(
+            key=bark_cfg["key"],
+            text=text,
+            title=title,
+            server=bark_cfg.get("server", "https://api.day.app"),
+            group=bark_cfg.get("group", "Find-Score"),
+            sound=bark_cfg.get("sound", "bell"),
+        ):
+            delivered_any = True
+
+    telegram_cfg = channels.get("telegram")
+    if isinstance(telegram_cfg, dict) and telegram_cfg.get("bot_token") and telegram_cfg.get("chat_id"):
+        if send_telegram(
+            bot_token=telegram_cfg["bot_token"],
+            chat_id=telegram_cfg["chat_id"],
+            text=text,
+        ):
+            delivered_any = True
+
+    return delivered_any
+
+
 def send_batch(
     bot_token: str,
     chat_id: str,
@@ -193,3 +287,4 @@ def send_batch(
         if not send_telegram(bot_token, chat_id, message):
             return False
     return True
+
