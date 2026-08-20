@@ -14,7 +14,7 @@ from requests import RequestException
 
 from .config import AppConfig, ConfigError, load_config
 from .notify import send_bark
-from .session import Grade, JwxtSession, SessionExpired
+from .session import ApiError, Grade, JwxtSession, SessionExpired
 from .storage import CACHE_FILE, COOKIES_FILE, LOCK_FILE, LOG_FILE, atomic_write_json
 
 log = logging.getLogger("find-score")
@@ -86,7 +86,11 @@ def load_cache() -> dict[str, str] | None:
     ):
         log.warning("成绩缓存格式无效，将重新建立基线")
         return None
-    return {key: value for key, value in data.items() if isinstance(key, str) and isinstance(value, str)}
+    return {
+        key: value
+        for key, value in data.items()
+        if isinstance(key, str) and isinstance(value, str)
+    }
 
 
 def _parse_entry_year(student_id: str) -> int:
@@ -134,7 +138,7 @@ def _enrich_grade(client: JwxtSession, grade: Grade) -> None:
         return
     try:
         details = client.fetch_grade_details(str(grade.get("WID", "")))
-    except Exception:
+    except (RequestException, SessionExpired, ApiError):
         return
     for item in details.get("itemScores", []):
         code = item.get("code")
@@ -271,8 +275,8 @@ def main() -> int:
     except (ConfigError, OSError, RuntimeError, RequestException) as error:
         log.error("%s", error)
         return 1
-    except Exception as error:
-        log.exception("查询失败: %s", error)
+    except Exception:
+        log.exception("查询失败")
         return 1
 
 
