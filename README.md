@@ -11,6 +11,7 @@
 
 ## 特点
 
+- Python 3.13
 - 单用户
 - Bark-only
 - macOS launchd 定时执行
@@ -22,7 +23,7 @@
 ## 安装
 
 ```bash
-uv sync --frozen
+uv sync --frozen --python 3.13
 ```
 
 创建 `config.json`：
