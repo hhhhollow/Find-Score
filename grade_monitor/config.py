@@ -1,6 +1,7 @@
 """Single-user configuration."""
 
 import json
+import math
 from pathlib import Path
 from typing import TypedDict
 from urllib.parse import urlsplit
@@ -44,11 +45,22 @@ def _text(value: object, field: str, *, strip: bool = True) -> str:
 def _positive_int(value: object, field: str) -> int:
     if isinstance(value, bool):
         raise ConfigError(f"{field} 必须是正整数")
-    try:
+
+    if isinstance(value, int):
+        result = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            raise ConfigError(f"{field} 必须是正整数")
         result = int(value)
-    except (TypeError, ValueError) as error:
-        raise ConfigError(f"{field} 必须是正整数") from error
-    if result <= 0 or (isinstance(value, float) and not value.is_integer()):
+    elif isinstance(value, str):
+        try:
+            result = int(value.strip())
+        except ValueError as error:
+            raise ConfigError(f"{field} 必须是正整数") from error
+    else:
+        raise ConfigError(f"{field} 必须是正整数")
+
+    if result <= 0:
         raise ConfigError(f"{field} 必须是正整数")
     return result
 
