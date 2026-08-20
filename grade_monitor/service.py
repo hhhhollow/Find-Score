@@ -49,7 +49,7 @@ def render_plist(interval_minutes: int) -> bytes:
     payload = {
         "Label": LAUNCHD_LABEL,
         "ProgramArguments": [
-            str(Path(sys.executable).resolve()),
+            str(Path(sys.executable).absolute()),
             "-m",
             "grade_monitor",
         ],
