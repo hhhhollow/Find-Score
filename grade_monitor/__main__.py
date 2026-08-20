@@ -6,14 +6,15 @@ import logging
 import math
 import os
 import re
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 
 from requests import RequestException
 
-from .config import ConfigError, load_config
+from .config import AppConfig, ConfigError, load_config
 from .notify import send_bark
-from .session import JwxtSession, SessionExpired
+from .session import Grade, JwxtSession, SessionExpired
 from .storage import CACHE_FILE, COOKIES_FILE, LOCK_FILE, LOG_FILE, atomic_write_json
 
 log = logging.getLogger("find-score")
@@ -43,7 +44,7 @@ def configure_logging() -> None:
 
 
 @contextmanager
-def instance_lock():
+def instance_lock() -> Iterator[None]:
     LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(LOCK_FILE, "w", encoding="utf-8") as file:
         try:
@@ -55,7 +56,7 @@ def instance_lock():
         yield
 
 
-def _cache_key(grade: dict) -> str:
+def _cache_key(grade: Grade) -> str:
     term = str(grade.get("_termCode") or "").strip()
     course = (
         str(grade.get("courseNo") or "").strip()
@@ -65,11 +66,8 @@ def _cache_key(grade: dict) -> str:
     return f"{term}|{course}"
 
 
-def _snapshot(grades: list[dict]) -> dict[str, str]:
-    return {
-        _cache_key(grade): str(grade.get("score", ""))
-        for grade in grades
-    }
+def _snapshot(grades: Sequence[Grade]) -> dict[str, str]:
+    return {_cache_key(grade): str(grade.get("score", "")) for grade in grades}
 
 
 def load_cache() -> dict[str, str] | None:
@@ -88,7 +86,7 @@ def load_cache() -> dict[str, str] | None:
     ):
         log.warning("成绩缓存格式无效，将重新建立基线")
         return None
-    return data
+    return {key: value for key, value in data.items() if isinstance(key, str) and isinstance(value, str)}
 
 
 def _parse_entry_year(student_id: str) -> int:
@@ -118,7 +116,7 @@ def _number(value: object) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _weighted_average(grades: list[dict]) -> float | None:
+def _weighted_average(grades: Sequence[Grade]) -> float | None:
     total = 0.0
     credits = 0.0
     for grade in grades:
@@ -131,14 +129,14 @@ def _weighted_average(grades: list[dict]) -> float | None:
     return total / credits if credits else None
 
 
-def _enrich_grade(client: JwxtSession, grade: dict) -> None:
+def _enrich_grade(client: JwxtSession, grade: Grade) -> None:
     if not grade.get("_hasItemScores"):
         return
     try:
         details = client.fetch_grade_details(str(grade.get("WID", "")))
     except Exception:
         return
-    for item in details.get("itemScores") or []:
+    for item in details.get("itemScores", []):
         code = item.get("code")
         if code == "PSCJ":
             grade["usualScore"] = item.get("value", "")
@@ -146,26 +144,29 @@ def _enrich_grade(client: JwxtSession, grade: dict) -> None:
             grade["finalScore"] = item.get("value", "")
 
 
-def _format_grade(grade: dict, entry_year: int, old_score: str | None = None) -> str:
+def _format_grade(grade: Grade, entry_year: int, old_score: str | None = None) -> str:
     lines = [str(grade.get("courseName", "未知课程"))]
     term = str(grade.get("_termCode", ""))
     if term:
         lines.append(f"学期：{_format_term(term, entry_year)}")
-    if grade.get("usualScore") not in (None, ""):
-        lines.append(f"平时成绩：{grade['usualScore']}")
-    if grade.get("finalScore") not in (None, ""):
-        lines.append(f"期末成绩：{grade['finalScore']}")
+    usual = grade.get("usualScore")
+    if usual not in (None, ""):
+        lines.append(f"平时成绩：{usual}")
+    final = grade.get("finalScore")
+    if final not in (None, ""):
+        lines.append(f"期末成绩：{final}")
     score = grade.get("score", "")
     if old_score is None:
         lines.append(f"总成绩：{score}")
     else:
         lines.append(f"总成绩：{old_score} → {score}")
-    if grade.get("credit") not in (None, ""):
-        lines.append(f"学分：{grade['credit']}")
+    credit = grade.get("credit")
+    if credit not in (None, ""):
+        lines.append(f"学分：{credit}")
     return "\n".join(lines)
 
 
-def _fetch_grades(client: JwxtSession) -> list[dict]:
+def _fetch_grades(client: JwxtSession) -> list[Grade]:
     try:
         return client.fetch_all_grades()
     except SessionExpired:
@@ -174,7 +175,7 @@ def _fetch_grades(client: JwxtSession) -> list[dict]:
         return client.fetch_all_grades()
 
 
-def _send(cfg: dict, text: str, title: str) -> bool:
+def _send(cfg: AppConfig, text: str, title: str) -> bool:
     bark = cfg["bark"]
     return send_bark(
         bark["key"],
@@ -212,8 +213,8 @@ def run_once() -> bool:
             log.info("初始化完成，共 %d 门课程", len(grades))
             return True
 
-        new_grades = []
-        updated_grades = []
+        new_grades: list[Grade] = []
+        updated_grades: list[tuple[Grade, str]] = []
         for grade in grades:
             key = _cache_key(grade)
             score = new_snapshot[key]
@@ -235,10 +236,7 @@ def run_once() -> bool:
                 _enrich_grade(client, grade)
             sections.append(
                 f"🎓 新成绩 {len(new_grades)} 门\n\n"
-                + "\n\n".join(
-                    _format_grade(grade, entry_year)
-                    for grade in new_grades
-                )
+                + "\n\n".join(_format_grade(grade, entry_year) for grade in new_grades)
             )
 
         if updated_grades:
