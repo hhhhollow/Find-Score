@@ -97,6 +97,8 @@ def load_config(path: Path = CONFIG_FILE) -> AppConfig:
         raise ConfigError("bark 必须是对象")
 
     key = _text(bark.get("key"), "bark.key").strip("/")
+    if not key:
+        raise ConfigError("bark.key 必须是非空字符串")
     if any(character in key for character in "/?#"):
         raise ConfigError("bark.key 必须是单段 key")
 

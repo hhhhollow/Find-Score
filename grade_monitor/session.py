@@ -192,10 +192,11 @@ class JwxtSession:
                 f"{CJZHCXAPP}/*default/index.do",
                 params={"THEME": "indigo", "forceApp": "cjzhcxapp"},
                 timeout=15,
+                allow_redirects=False,
             )
         except requests.RequestException:
-            return True
-        return response.status_code not in (401, 403)
+            return False
+        return 200 <= response.status_code < 300
 
     def login(self) -> bool:
         """Log in once. The credential POST is deliberately never auto-retried."""

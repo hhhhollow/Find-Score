@@ -217,6 +217,7 @@ def run_once() -> bool:
             log.info("初始化完成，共 %d 门课程", len(grades))
             return True
 
+        saved_snapshot = old_snapshot | new_snapshot
         new_grades: list[Grade] = []
         updated_grades: list[tuple[Grade, str]] = []
         for grade in grades:
@@ -228,7 +229,7 @@ def run_once() -> bool:
                 updated_grades.append((grade, old_snapshot[key]))
 
         if not new_grades and not updated_grades:
-            atomic_write_json(CACHE_FILE, new_snapshot)
+            atomic_write_json(CACHE_FILE, saved_snapshot)
             log.info("没有成绩变化")
             return True
 
@@ -261,15 +262,15 @@ def run_once() -> bool:
         if not _send(cfg, "\n\n".join(sections), "🎓 成绩提醒"):
             raise RuntimeError("Bark 通知失败；缓存未更新，下次会重试")
 
-        atomic_write_json(CACHE_FILE, new_snapshot)
+        atomic_write_json(CACHE_FILE, saved_snapshot)
         log.info("已发送 %d 条成绩变化", len(new_grades) + len(updated_grades))
         return True
 
 
 def main() -> int:
     os.umask(0o077)
-    configure_logging()
     try:
+        configure_logging()
         with instance_lock():
             return 0 if run_once() else 1
     except (ConfigError, OSError, RuntimeError, RequestException) as error:
