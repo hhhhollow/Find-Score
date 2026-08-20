@@ -1,6 +1,4 @@
-"""
-教务系统 HTTP 会话管理：CAS 登录、成绩接口。
-"""
+"""BISTU CAS login and grade API access."""
 
 import json
 import re
@@ -11,32 +9,33 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .constants import (
-    CAS_CAPTCHA_CHECK,
-    CAS_HOST,
-    CAS_LOGIN_PATH,
-    CJZHCXAPP,
-    CXWDCJ_URL,
-    DETAILS_URL,
-    JWXT_BASE,
-    JWXT_SERVICE,
-    USER_AGENT,
-)
 from .crypto import encrypt_password
-from .logging_config import log
 from .storage import atomic_write_json
+
+CAS_HOST = "https://wxjw.bistu.edu.cn"
+CAS_LOGIN_PATH = "/authserver/login"
+CAS_CAPTCHA_CHECK = "/authserver/checkNeedCaptcha.htl"
+JWXT_BASE = "https://jwxt.bistu.edu.cn"
+JWXT_SERVICE = f"{JWXT_BASE}/jwapp/sys/emappagelog/modules/emappagelog/loginNew.do"
+CJZHCXAPP = f"{JWXT_BASE}/jwapp/sys/cjzhcxapp"
+CXWDCJ_URL = f"{CJZHCXAPP}/modules/wdcj/cxwdcj.do"
+DETAILS_URL = f"{CJZHCXAPP}/api/wdcj/details.do"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
 
 
 class SessionExpired(Exception):
-    """检测到会话失效，需要重新登录。"""
+    """The current login session is no longer valid."""
 
 
 class ApiError(RuntimeError):
-    """教务系统返回了可解析但业务失败的响应。"""
+    """The grade system returned an invalid business response."""
 
 
 def _build_session() -> requests.Session:
-    """创建带重试适配器的 requests.Session（应对学校网络不稳定）。"""
     session = requests.Session()
     retry = Retry(
         total=3,
@@ -51,21 +50,22 @@ def _build_session() -> requests.Session:
 
 
 class JwxtSession:
-    """封装一个用户的教务系统会话（登录 + 成绩查询）。"""
-
-    def __init__(self, username: str, password: str,
-                 cookies_path: Path | None = None):
+    def __init__(
+        self,
+        username: str,
+        password: str,
+        cookies_path: Path | None = None,
+    ):
         self.username = username
         self.password = password
         self.cookies_path = cookies_path
         self.session = _build_session()
-        self.session.headers.update({
-            "User-Agent": USER_AGENT,
-            "Referer": (
-                f"{JWXT_BASE}/jwapp/sys/homeapp/home/index.html"
-                f"?contextPath=/jwapp"
-            ),
-        })
+        self.session.headers.update(
+            {
+                "User-Agent": USER_AGENT,
+                "Referer": f"{JWXT_BASE}/jwapp/sys/homeapp/home/index.html?contextPath=/jwapp",
+            }
+        )
         if cookies_path and cookies_path.exists():
             self._load_cookies()
 
@@ -78,121 +78,77 @@ class JwxtSession:
     def __exit__(self, _exc_type, _exc_value, _traceback) -> None:
         self.close()
 
-    # ── Cookies 持久化 ────────────────────────────────────────────────────
-
     def _load_cookies(self) -> None:
         try:
-            with open(self.cookies_path, encoding="utf-8") as f:
-                data = json.load(f)
-            for c in data:
+            with open(self.cookies_path, encoding="utf-8") as file:
+                data = json.load(file)
+            for cookie in data:
                 self.session.cookies.set(
-                    c["name"], c["value"],
-                    domain=c.get("domain", ""),
-                    path=c.get("path", "/"),
+                    cookie["name"],
+                    cookie["value"],
+                    domain=cookie.get("domain", ""),
+                    path=cookie.get("path", "/"),
                 )
-            log.info(f"[{self.username}] 已加载持久 cookies ({len(data)} 个)")
-        except Exception as e:
-            log.warning(f"[{self.username}] cookies 加载失败，忽略: {e}")
+        except Exception:
+            self.session.cookies.clear()
 
     def _save_cookies(self) -> None:
         if not self.cookies_path:
             return
-        try:
-            data = [
-                {"name": c.name, "value": c.value,
-                 "domain": c.domain, "path": c.path}
-                for c in self.session.cookies
-            ]
-            atomic_write_json(self.cookies_path, data)
-        except Exception as e:
-            log.warning(f"[{self.username}] cookies 保存失败: {e}")
-
-    def nuke_session(self) -> None:
-        """彻底清除所有会话状态：内存 cookies + 持久化文件 + 重建连接池。
-
-        用于 HTTP 403 等 app 上下文失效后的最后手段。
-        """
-        self.session.cookies.clear()
-        if self.cookies_path and self.cookies_path.exists():
-            try:
-                self.cookies_path.unlink()
-                log.info(f"[{self.username}] 已删除持久 cookies 文件")
-            except OSError as e:
-                log.warning(f"[{self.username}] 删除 cookies 文件失败: {e}")
-
-        old_headers = dict(self.session.headers)
-        self.session.close()
-        self.session = _build_session()
-        self.session.headers.update(old_headers)
-        log.info(f"[{self.username}] 会话已彻底重置")
-
-    # ── CAS 登录 ──────────────────────────────────────────────────────────
+        data = [
+            {
+                "name": cookie.name,
+                "value": cookie.value,
+                "domain": cookie.domain,
+                "path": cookie.path,
+            }
+            for cookie in self.session.cookies
+        ]
+        atomic_write_json(self.cookies_path, data)
 
     def _need_captcha(self) -> bool:
         try:
-            r = self.session.get(
+            response = self.session.get(
                 f"{CAS_HOST}{CAS_CAPTCHA_CHECK}",
                 params={"username": self.username},
                 timeout=10,
             )
-            return bool(r.json().get("isNeed", False))
-        except Exception as e:
-            log.debug(f"[{self.username}] 验证码检测失败，按不需要处理: {e}")
+            return bool(response.json().get("isNeed", False))
+        except Exception:
             return False
 
     @staticmethod
     def _parse_login_form(html: str) -> tuple[str | None, str]:
-        """从 CAS 登录页提取 (execution, salt)。execution 缺失时返回 (None, "")。"""
-        m = re.search(r'name="execution"\s+value="([^"]+)"', html)
-        if not m:
+        execution = re.search(r'name="execution"\s+value="([^"]+)"', html)
+        if not execution:
             return None, ""
-        m_salt = re.search(r'id="pwdEncryptSalt"\s+value="([^"]*)"', html)
-        return m.group(1), (m_salt.group(1) if m_salt else "")
+        salt = re.search(r'id="pwdEncryptSalt"\s+value="([^"]*)"', html)
+        return execution.group(1), salt.group(1) if salt else ""
 
     def _register_app_context(self) -> bool:
-        """注册 cjzhcxapp 应用上下文（不然 cxwdcj.do 会 403）。
-
-        网络抖动不算失败（返回 True 继续）；明确的 401/403 才算失败。
-        """
         try:
-            ctx_r = self.session.get(
+            response = self.session.get(
                 f"{CJZHCXAPP}/*default/index.do",
                 params={"THEME": "indigo", "forceApp": "cjzhcxapp"},
                 timeout=15,
             )
-        except Exception as e:
-            log.warning(f"[{self.username}] 访问 cjzhcxapp 入口失败（可能不影响）: {e}")
+        except requests.RequestException:
             return True
-        if ctx_r.status_code in (401, 403):
-            log.error(
-                f"[{self.username}] cjzhcxapp 上下文注册失败 "
-                f"(HTTP {ctx_r.status_code})，成绩子系统可能不可用"
-            )
-            return False
-        return True
+        return response.status_code not in (401, 403)
 
     def login(self) -> bool:
-        """完整 CAS 登录流程。成功返回 True。"""
-        # 清掉旧 cookies，避免残留 CASTGC 让 CAS 跳过登录表单
         self.session.cookies.clear()
         try:
-            r = self.session.get(
+            response = self.session.get(
                 f"{CAS_HOST}{CAS_LOGIN_PATH}",
                 params={"service": JWXT_SERVICE},
                 timeout=15,
             )
-            execution, salt = self._parse_login_form(r.text)
-            if not execution:
-                log.error("未能获取 CAS execution token")
+            execution, salt = self._parse_login_form(response.text)
+            if not execution or self._need_captcha():
                 return False
 
-            if self._need_captcha():
-                log.error(
-                    "触发验证码保护，请用浏览器手动登录一次或等几小时后重试"
-                )
-                return False
-
-            r = self.session.post(
+            response = self.session.post(
                 f"{CAS_HOST}{CAS_LOGIN_PATH}",
                 params={"service": JWXT_SERVICE},
                 data={
@@ -208,51 +164,36 @@ class JwxtSession:
                 timeout=20,
                 allow_redirects=True,
             )
-        except Exception as e:
-            log.error(f"登录异常: {type(e).__name__}: {e}")
+        except requests.RequestException:
             return False
 
-        if JWXT_BASE in r.url:
-            log.info(f"[{self.username}] CAS 登录成功")
-            if not self._register_app_context():
-                return False
-            self._save_cookies()
-            return True
+        if JWXT_BASE not in response.url or not self._register_app_context():
+            return False
 
-        if "showErrorTip" in r.text or "密码错误" in r.text:
-            log.error("登录失败：账号或密码错误")
-        else:
-            log.error(f"登录失败，当前 URL: {r.url}")
-        return False
-
-    # ── 数据接口 ──────────────────────────────────────────────────────────
+        self._save_cookies()
+        return True
 
     def _post_json(self, url: str, data: dict | None = None) -> dict:
-        """POST + 检测会话失效（302 跳 CAS / 401-403 / 非 JSON 响应）。"""
-        r = self.session.post(
-            url, data=data or {}, timeout=15, allow_redirects=False,
+        response = self.session.post(
+            url,
+            data=data or {},
+            timeout=15,
+            allow_redirects=False,
         )
-        if r.status_code in (301, 302):
-            raise SessionExpired(
-                f"被重定向到 {r.headers.get('Location', '?')}"
-            )
-        if r.status_code in (401, 403):
-            raise SessionExpired(
-                f"HTTP {r.status_code}（app 上下文/会话失效）"
-            )
-        r.raise_for_status()
-        ctype = r.headers.get("Content-Type", "")
-        if "json" not in ctype.lower():
-            raise SessionExpired(f"非 JSON 响应 ({ctype})")
-        payload = r.json()
+        if response.status_code in (301, 302, 401, 403):
+            raise SessionExpired(f"HTTP {response.status_code}")
+        response.raise_for_status()
+        if "json" not in response.headers.get("Content-Type", "").lower():
+            raise SessionExpired("non-JSON response")
+        payload = response.json()
         if not isinstance(payload, dict):
             raise ApiError("API 响应顶层必须是对象")
         return payload
 
     def fetch_all_grades(self) -> list[dict]:
-        """拉所有成绩，字段规范化后返回。"""
         data = self._post_json(
-            CXWDCJ_URL, {"pageSize": "200", "pageNumber": "1"},
+            CXWDCJ_URL,
+            {"pageSize": "200", "pageNumber": "1"},
         )
         if data.get("code") != "0":
             raise ApiError(f"成绩列表接口失败 (code={data.get('code', '?')})")
@@ -260,9 +201,11 @@ class JwxtSession:
         result = datas.get("cxwdcj") if isinstance(datas, dict) else None
         if not isinstance(result, dict) or not isinstance(result.get("rows"), list):
             raise ApiError("成绩列表接口响应缺少 datas.cxwdcj.rows")
+
         rows = result["rows"]
         if not all(isinstance(row, Mapping) for row in rows):
             raise ApiError("成绩列表接口 rows 必须全部是对象")
+
         return [
             {
                 "_termCode": row.get("XNXQDM", ""),
@@ -270,7 +213,6 @@ class JwxtSession:
                 "courseName": row.get("KCM", "未知课程"),
                 "score": row.get("XSZCJ", ""),
                 "credit": row.get("XF", ""),
-                "gradePoint": row.get("JD", ""),
                 "WID": row.get("WID", ""),
                 "_hasItemScores": bool(row.get("FXCJ")),
             }
@@ -278,7 +220,6 @@ class JwxtSession:
         ]
 
     def fetch_grade_details(self, wid: str) -> dict:
-        """拉单门课的分项成绩 → 返回 details 子对象，含 itemScores[]。"""
         if not wid:
             return {}
         data = self._post_json(DETAILS_URL, {"WID": wid})

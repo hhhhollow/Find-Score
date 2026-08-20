@@ -1,53 +1,43 @@
-"""运行时 JSON 文件的通用持久化工具。"""
+"""Runtime paths and atomic JSON persistence."""
 
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
 
-def _sync_file(file) -> None:
-    """把 Python/stdio 缓冲刷新到底层文件，降低异常掉电造成状态丢失的风险。"""
-    file.flush()
-    os.fsync(file.fileno())
+def resolve_runtime_dir() -> Path:
+    configured = os.environ.get("FIND_SCORE_HOME")
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    source_root = Path(__file__).resolve().parent.parent
+    if (source_root / "config.json").is_file():
+        return source_root
+    return Path.cwd().resolve()
 
 
-def atomic_write_text(path: Path, text: str, mode: int = 0o644) -> None:
-    """原子写入 UTF-8 文本，并设置明确权限。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            file.write(text)
-            _sync_file(file)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+BASE_DIR = resolve_runtime_dir()
+CONFIG_FILE = BASE_DIR / "config.json"
+CACHE_FILE = BASE_DIR / "grades_cache.json"
+COOKIES_FILE = BASE_DIR / "cookies.json"
+LOG_FILE = BASE_DIR / "grade_monitor.log"
+LOCK_FILE = BASE_DIR / ".grade_monitor.lock"
 
 
 def atomic_write_json(path: Path, data: Any, mode: int = 0o600) -> None:
-    """以私有权限原子写 JSON，避免中断损坏或状态文件被其他用户读取。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    fd, temp_path = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as file:
             json.dump(data, file, ensure_ascii=False, indent=2)
-            _sync_file(file)
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
+            file.flush()
+            os.fsync(file.fileno())
+        os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
     finally:
         try:
-            os.unlink(tmp)
+            os.unlink(temp_path)
         except OSError:
             pass
-
-
-def safe_name(name: str) -> str:
-    """把用户显示名转换为兼容旧版缓存路径的文件名片段。"""
-    return re.sub(r"[^a-zA-Z0-9_-]", "_", name) or "default"

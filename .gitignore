@@ -1,44 +1,19 @@
-# === 敏感配置 & 运行时数据 ===
 config.json
 grades_cache.json
-grades_cache.*.json
-cookies.*.json
+cookies.json
 .grade_monitor.lock
-.grade_monitor_state.json
-
-# === 日志文件 ===
 *.log
 *.log.*
-grade_monitor.log*
-launchd.stdout.log
 launchd.stderr.log
 
-# === Python ===
 .venv/
 venv/
-env/
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 *.egg-info/
 dist/
 build/
-*.egg
 
-# === macOS ===
 .DS_Store
-.AppleDouble
-.LSOverride
-._*
-.Spotlight-V100
-.Trashes
-
-# === IDE / 编辑器 ===
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-.project
-.settings/
