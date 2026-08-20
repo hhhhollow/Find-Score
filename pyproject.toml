@@ -3,7 +3,7 @@ name = "find-score"
 version = "2.0.0"
 description = "Minimal BISTU grade monitor with Bark notifications"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     "pycryptodome>=3.20.0",
     "requests>=2.31.0",
@@ -23,6 +23,6 @@ module-root = ""
 
 [tool.pyright]
 include = ["grade_monitor"]
-pythonVersion = "3.10"
+pythonVersion = "3.13"
 typeCheckingMode = "basic"
 reportMissingTypeStubs = false
