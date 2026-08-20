@@ -110,7 +110,7 @@ class JwxtSession:
     def close(self) -> None:
         self.session.close()
 
-    def __enter__(self) -> "JwxtSession":
+    def __enter__(self) -> "JwxtSession":  # noqa: PYI034 -- Python 3.10 has no typing.Self
         return self
 
     def __exit__(self, _exc_type: object, _exc_value: object, _traceback: object) -> None:
@@ -123,17 +123,17 @@ class JwxtSession:
             with open(self.cookies_path, encoding="utf-8") as file:
                 data = json.load(file)
             if not isinstance(data, list):
-                raise ValueError("cookie 文件必须是数组")
+                raise TypeError("cookie 文件必须是数组")
             for cookie in data:
                 if not isinstance(cookie, dict):
-                    raise ValueError("cookie 项必须是对象")
+                    raise TypeError("cookie 项必须是对象")
                 self.session.cookies.set(
                     str(cookie["name"]),
                     str(cookie["value"]),
                     domain=str(cookie.get("domain", "")),
                     path=str(cookie.get("path", "/")),
                 )
-        except Exception:
+        except (OSError, ValueError, TypeError, KeyError):
             self.session.cookies.clear()
 
     def _save_cookies(self) -> None:
