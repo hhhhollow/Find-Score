@@ -20,3 +20,9 @@ build-backend = "uv_build"
 [tool.uv.build-backend]
 module-name = "grade_monitor"
 module-root = ""
+
+[tool.pyright]
+include = ["grade_monitor"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
