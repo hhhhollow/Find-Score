@@ -193,9 +193,10 @@ class JwxtSession:
                 params={"THEME": "indigo", "forceApp": "cjzhcxapp"},
                 timeout=15,
             )
+            response.raise_for_status()
         except requests.RequestException:
-            return True
-        return response.status_code not in (401, 403)
+            return False
+        return response.url == JWXT_BASE or response.url.startswith(f"{JWXT_BASE}/")
 
     def login(self) -> bool:
         """Log in once. The credential POST is deliberately never auto-retried."""
