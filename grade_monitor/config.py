@@ -2,11 +2,30 @@
 
 import json
 from pathlib import Path
+from typing import TypedDict
 from urllib.parse import urlsplit
 
 from .storage import CONFIG_FILE
 
 DEFAULT_INTERVAL_MINUTES = 20
+
+
+class JwxtConfig(TypedDict):
+    username: str
+    password: str
+
+
+class BarkConfig(TypedDict):
+    key: str
+    server: str
+    group: str
+    sound: str
+
+
+class AppConfig(TypedDict):
+    jwxt: JwxtConfig
+    bark: BarkConfig
+    interval_minutes: int
 
 
 class ConfigError(ValueError):
@@ -46,7 +65,7 @@ def _bark_server(value: object) -> str:
     return server
 
 
-def load_config(path: Path = CONFIG_FILE) -> dict:
+def load_config(path: Path = CONFIG_FILE) -> AppConfig:
     try:
         with open(path, encoding="utf-8") as file:
             raw = json.load(file)
