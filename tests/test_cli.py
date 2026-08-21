@@ -38,9 +38,11 @@ class CliTests(unittest.TestCase):
             "interval_minutes": 20,
         }
         output = io.StringIO()
-        with patch.object(cli, "load_config", return_value=config):
-            with redirect_stdout(output):
-                self.assertEqual(cli.main(["config"]), 0)
+        with (
+            patch.object(cli, "load_config", return_value=config),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(cli.main(["config"]), 0)
 
         text = output.getvalue()
         self.assertIn("2024****45", text)
@@ -52,9 +54,8 @@ class CliTests(unittest.TestCase):
             path = Path(directory) / "grade_monitor.log"
             path.write_text("one\ntwo\nthree\n", encoding="utf-8")
             output = io.StringIO()
-            with patch.object(cli, "LOG_FILE", path):
-                with redirect_stdout(output):
-                    self.assertEqual(cli.main(["logs", "--lines", "2"]), 0)
+            with patch.object(cli, "LOG_FILE", path), redirect_stdout(output):
+                self.assertEqual(cli.main(["logs", "--lines", "2"]), 0)
 
         self.assertEqual(output.getvalue(), "two\nthree\n")
 
