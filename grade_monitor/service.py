@@ -51,7 +51,8 @@ def render_plist(interval_minutes: int) -> bytes:
         "ProgramArguments": [
             str(Path(sys.executable).absolute()),
             "-m",
-            "grade_monitor",
+            "grade_monitor.cli",
+            "check",
         ],
         "WorkingDirectory": str(BASE_DIR),
         "EnvironmentVariables": {
