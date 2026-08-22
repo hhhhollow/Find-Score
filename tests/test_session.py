@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from grade_monitor.session import (
     GRADE_PAGE_SIZE,
     ApiError,
@@ -97,6 +99,20 @@ class SessionResponseTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ApiError, "isNeed"):
             client._need_captcha()
+
+    def test_register_app_context_fails_closed(self) -> None:
+        client = object.__new__(JwxtSession)
+        client.session = Mock()
+        client.session.get.side_effect = requests.RequestException("network")
+        self.assertFalse(client._register_app_context())
+
+        client.session.get.side_effect = None
+        client.session.get.return_value = Mock(status_code=500)
+        self.assertFalse(client._register_app_context())
+
+        client.session.get.return_value = Mock(status_code=200)
+        self.assertTrue(client._register_app_context())
+        self.assertFalse(client.session.get.call_args.kwargs["allow_redirects"])
 
     def test_session_adapter_does_not_retry_post(self) -> None:
         session = _build_session()
