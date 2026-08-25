@@ -1,4 +1,3 @@
-import os
 import plistlib
 import sys
 import tempfile
