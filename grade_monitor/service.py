@@ -6,6 +6,7 @@ import plistlib
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from .config import ConfigError, load_config
 from .storage import BASE_DIR, LOG_FILE
@@ -25,6 +26,14 @@ def _target() -> str:
     return f"gui/{os.getuid()}/{LAUNCHD_LABEL}"
 
 
+def _service_python() -> Path:
+    """Prefer the project-local virtualenv path because it is stable across uv rebuilds."""
+    project_python = BASE_DIR / ".venv" / "bin" / "python"
+    if project_python.is_file() and os.access(project_python, os.X_OK):
+        return project_python.absolute()
+    return Path(sys.executable).absolute()
+
+
 def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         command,
@@ -42,6 +51,19 @@ def _loaded() -> bool:
     return _run(["launchctl", "print", _target()], check=False).returncode == 0
 
 
+def _definition_program(path: Path) -> list[str] | None:
+    try:
+        payload: Any = plistlib.loads(path.read_bytes())
+    except (FileNotFoundError, OSError, plistlib.InvalidFileException):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    arguments = payload.get("ProgramArguments")
+    if not isinstance(arguments, list) or not all(isinstance(item, str) for item in arguments):
+        return None
+    return arguments
+
+
 def render_plist(interval_minutes: int) -> bytes:
     if sys.platform != "darwin":
         raise ServiceError("简化版仅支持 macOS launchd")
@@ -49,7 +71,7 @@ def render_plist(interval_minutes: int) -> bytes:
     payload = {
         "Label": LAUNCHD_LABEL,
         "ProgramArguments": [
-            str(Path(sys.executable).absolute()),
+            str(_service_python()),
             "-m",
             "grade_monitor.cli",
             "check",
@@ -95,11 +117,34 @@ def stop_service() -> None:
         pass
 
 
+def _definition_health(path: Path) -> tuple[bool, str]:
+    arguments = _definition_program(path)
+    if arguments is None:
+        return False, "后台任务定义缺失或无法解析"
+    if len(arguments) < 4 or arguments[1:] != ["-m", "grade_monitor.cli", "check"]:
+        return False, "后台任务命令与当前 CLI 不一致，请执行 find-score restart"
+
+    configured_python = Path(arguments[0])
+    expected_python = _service_python()
+    if not configured_python.is_file() or not os.access(configured_python, os.X_OK):
+        return False, f"后台 Python 不可用: {configured_python}；请执行 find-score restart"
+    if configured_python.absolute() != expected_python.absolute():
+        return (
+            False,
+            f"后台 Python 已过期: {configured_python}；当前应使用 {expected_python}，请执行 find-score restart",
+        )
+    return True, f"后台 Python: {configured_python}"
+
+
 def status_service() -> int:
     result = _run(["launchctl", "print", _target()], check=False)
     if result.stdout:
         print(result.stdout.rstrip())
-    print(f"\n定义文件: {_definition_path()}")
+    definition_path = _definition_path()
+    print(f"\n定义文件: {definition_path}")
+
+    healthy, health_message = _definition_health(definition_path)
+    print(f"运行环境: {'✅' if healthy else '⚠️'} {health_message}")
 
     print("\n=== 最近日志 ===")
     try:
@@ -108,7 +153,9 @@ def status_service() -> int:
     except FileNotFoundError:
         print("（暂无日志）")
 
-    return 0 if result.returncode == 0 else 3
+    if result.returncode != 0:
+        return 3
+    return 0 if healthy else 1
 
 
 def main(argv: list[str] | None = None) -> int:
