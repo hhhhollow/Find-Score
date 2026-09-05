@@ -67,7 +67,10 @@ def _positive_int(value: object, field: str) -> int:
 
 def _bark_server(value: object) -> str:
     server = _text(value, "bark.server").rstrip("/")
-    parsed = urlsplit(server)
+    try:
+        parsed = urlsplit(server)
+    except ValueError as error:
+        raise ConfigError("bark.server 必须是有效的 http/https URL") from error
     if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
         raise ConfigError("bark.server 必须是有效的 http/https URL")
     if parsed.username is not None or parsed.password is not None:

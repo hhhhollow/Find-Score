@@ -132,11 +132,14 @@ uv run find-score --version
 
 ## 安装为全局 CLI
 
-如果希望离开项目目录后也能直接执行：
+如果希望离开项目目录后也能直接执行，在包含 `config.json` 的项目根目录运行：
 
 ```bash
 uv tool install .
+export FIND_SCORE_HOME="$PWD"
 ```
+
+要让新终端也生效，将 `export FIND_SCORE_HOME="/项目的绝对路径"` 加入 `~/.zshrc`。全局安装不会复制配置文件。
 
 之后可以直接使用：
 
@@ -196,7 +199,7 @@ launchd.stderr.log   launchd 标准错误日志
 .grade_monitor.lock  防止查询任务重叠运行
 ```
 
-默认运行时目录是项目目录。也可以通过环境变量指定：
+运行时目录优先使用 `FIND_SCORE_HOME`；未设置时，使用含有 `config.json` 的源码项目目录，否则使用当前工作目录。可显式指定：
 
 ```bash
 FIND_SCORE_HOME=/path/to/data find-score check

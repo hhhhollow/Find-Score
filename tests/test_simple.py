@@ -56,18 +56,31 @@ class CoreTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 load_config(path)
 
+    def test_malformed_bark_server_is_config_error(self) -> None:
+        raw = {
+            "jwxt": {"username": "2024012345", "password": "secret"},
+            "bark": {"key": "abc", "server": "https://["},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            with self.assertRaisesRegex(ConfigError, "bark.server"):
+                load_config(path)
+
+    @patch("grade_monitor.__main__._send")
     @patch("grade_monitor.__main__.atomic_write_json")
     @patch("grade_monitor.__main__.load_cache")
     @patch("grade_monitor.__main__._fetch_grades")
     @patch("grade_monitor.__main__.JwxtSession")
     @patch("grade_monitor.__main__.load_config")
-    def test_temporarily_missing_grade_stays_in_cache(
+    def test_cache_is_written_only_after_notified_change(
         self,
         load_config_mock: MagicMock,
         session_class: MagicMock,
         fetch_grades_mock: MagicMock,
         load_cache_mock: MagicMock,
         write_json_mock: MagicMock,
+        send_mock: MagicMock,
     ) -> None:
         load_config_mock.return_value = {
             "jwxt": {"username": "2024012345", "password": "secret"},
@@ -89,11 +102,26 @@ class CoreTests(unittest.TestCase):
         }
 
         self.assertTrue(run_once())
+        write_json_mock.assert_not_called()
+        send_mock.assert_not_called()
+
+        fetch_grades_mock.return_value.append(
+            {"_termCode": "2025-2026-2", "courseNo": "C01", "score": "95"},
+        )
+        send_mock.return_value = False
+        with self.assertRaisesRegex(RuntimeError, "缓存未更新"):
+            run_once()
+        write_json_mock.assert_not_called()
+
+        send_mock.return_value = True
+        self.assertTrue(run_once())
+        self.assertEqual(send_mock.call_count, 2)
         write_json_mock.assert_called_once_with(
             CACHE_FILE,
             {
                 "2025-2026-2|A01": "90",
                 "2025-2026-2|B01": "80",
+                "2025-2026-2|C01": "95",
             },
         )
 
