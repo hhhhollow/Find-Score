@@ -1,9 +1,10 @@
-import unittest
 import base64
-from gmssl import sm2
+import unittest
+
 from grade_monitor.crypto import encrypt_sm2
 
 TEST_PUB_KEY = "BN6l0mvj55Fvvas/vgLD8/xYTA9Ni1+zsKivNpJJ1Scw7th3Wr3ZH/+GnF/rdULFRQR7Zs05t9Zz7z5MbQlvnm0="
+
 
 class CryptoTests(unittest.TestCase):
     def test_encrypt_sm2_valid(self) -> None:
@@ -22,6 +23,7 @@ class CryptoTests(unittest.TestCase):
     def test_invalid_key_length_raises(self) -> None:
         with self.assertRaises(ValueError):
             encrypt_sm2("password", "YWJj")  # "abc" -> 3 bytes
+
 
 if __name__ == "__main__":
     unittest.main()
