@@ -22,8 +22,25 @@ BASE_DIR = resolve_runtime_dir()
 CONFIG_FILE = BASE_DIR / "config.json"
 CACHE_FILE = BASE_DIR / "grades_cache.json"
 COOKIES_FILE = BASE_DIR / "cookies.json"
+STATUS_FILE = BASE_DIR / "status.json"
 LOG_FILE = BASE_DIR / "grade_monitor.log"
 LOCK_FILE = BASE_DIR / ".grade_monitor.lock"
+
+
+def load_status() -> dict[str, Any]:
+    if not STATUS_FILE.is_file():
+        return {}
+    try:
+        with open(STATUS_FILE, encoding="utf-8") as file:
+            data = json.load(file)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_status(status: Any) -> None:
+    atomic_write_json(STATUS_FILE, status)
+
 
 
 def atomic_write_json(path: Path, data: Any, mode: int = 0o600) -> None:

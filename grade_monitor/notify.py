@@ -14,6 +14,8 @@ def send_bark(
     server: str = "https://api.day.app",
     group: str = "Find-Score",
     sound: str = "bell",
+    level: str | None = None,
+    icon: str | None = None,
     retries: int = 3,
 ) -> bool:
     url = f"{server.rstrip('/')}/{quote(key.strip('/'), safe='')}/"
@@ -23,6 +25,10 @@ def send_bark(
         "group": group,
         "sound": sound,
     }
+    if level:
+        payload["level"] = level
+    if icon:
+        payload["icon"] = icon
 
     for attempt in range(max(1, retries)):
         try:
@@ -45,3 +51,28 @@ def send_bark(
             time.sleep(2**attempt)
 
     return False
+
+
+def send_alert(
+    key: str,
+    text: str,
+    *,
+    title: str = "⚠️ Find-Score 异常告警",
+    server: str = "https://api.day.app",
+    group: str = "Find-Score",
+    sound: str = "alarm",
+    level: str = "timeSensitive",
+    retries: int = 3,
+) -> bool:
+    """发送高优先级异常/风控告警通知。"""
+    return send_bark(
+        key,
+        text,
+        title=title,
+        server=server,
+        group=group,
+        sound=sound,
+        level=level,
+        retries=retries,
+    )
+

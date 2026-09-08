@@ -59,6 +59,67 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(output.getvalue(), "two\nthree\n")
 
+    def test_test_notify_success(self) -> None:
+        config = {
+            "jwxt": {"username": "2024012345", "password": "secret-password"},
+            "bark": {
+                "key": "secret-bark-key",
+                "server": "https://api.day.app",
+                "group": "Find-Score",
+                "sound": "bell",
+            },
+            "interval_minutes": 20,
+        }
+        with (
+            patch.object(cli, "load_config", return_value=config),
+            patch.object(cli, "send_bark", return_value=True) as send_mock,
+        ):
+            self.assertEqual(cli.main(["test-notify"]), 0)
+            send_mock.assert_called_once()
+
+    def test_cookie_status_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cookie_path = Path(directory) / "cookies.json"
+            cookie_path.write_text(
+                '[{"name": "_WEU", "value": "xyz"}, {"name": "GS_SESSIONID", "value": "123"}]',
+                encoding="utf-8",
+            )
+            output = io.StringIO()
+            with patch.object(cli, "COOKIES_FILE", cookie_path), redirect_stdout(output):
+                self.assertEqual(cli.main(["cookie"]), 0)
+
+            text = output.getvalue()
+            self.assertIn("_WEU=✅", text)
+            self.assertIn("GS_SESSIONID=✅", text)
+
+    def test_cookie_import_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cookie_path = Path(directory) / "cookies.json"
+            output = io.StringIO()
+            with (
+                patch.object(cli, "COOKIES_FILE", cookie_path),
+                patch.object(cli, "_verify_cookies", return_value=True),
+                redirect_stdout(output),
+            ):
+                ret = cli.main(["cookie", "-i", "_WEU=foo; GS_SESSIONID=bar"])
+                self.assertEqual(ret, 0)
+                self.assertTrue(cookie_path.is_file())
+
+            text = output.getvalue()
+            self.assertIn("已成功保存", text)
+            self.assertIn("校验成功", text)
+
+    def test_cookie_clear_command(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cookie_path = Path(directory) / "cookies.json"
+            cookie_path.write_text("[]", encoding="utf-8")
+            output = io.StringIO()
+            with patch.object(cli, "COOKIES_FILE", cookie_path), redirect_stdout(output):
+                ret = cli.main(["cookie", "--clear"])
+                self.assertEqual(ret, 0)
+                self.assertFalse(cookie_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
+

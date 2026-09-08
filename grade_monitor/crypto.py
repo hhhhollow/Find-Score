@@ -1,28 +1,37 @@
 """
-AES-CBC 密码加密（与教务前端 JS 一致）。
+国密 SM2 密码加密（与全新 SSO 前端 JS 一致）。
+采用 SM2(C1C3C2) 椭圆曲线公钥密码学，密文输出为 Base64 编码。
 """
 
 import base64
-import secrets
-import string
-
-from Crypto.Cipher import AES
-from Crypto.Util.Padding import pad
-
-_RAND_ALPHABET = string.ascii_letters + string.digits
+from gmssl import sm2
 
 
-def _rand_str(n: int) -> str:
-    """生成 n 位随机字母数字串。"""
-    return "".join(secrets.choice(_RAND_ALPHABET) for _ in range(n))
+def encrypt_sm2(plaintext: str, public_key_b64: str) -> str:
+    """用 SSO 返回的 SM2 公钥对密码进行加密。
 
+    Args:
+        plaintext: 待加密的明文密码。
+        public_key_b64: Base64 编码的 SM2 公钥。
 
-def encrypt_password(password: str, salt: str) -> str:
-    """用 CAS 返回的 salt 对密码做 AES-CBC 加密，与前端 JS 保持一致。"""
-    if not salt:
-        return password
-    key = salt.encode("utf-8")
-    iv = _rand_str(16).encode("utf-8")
-    plaintext = (_rand_str(64) + password).encode("utf-8")
-    cipher = AES.new(key, AES.MODE_CBC, iv)
-    return base64.b64encode(cipher.encrypt(pad(plaintext, AES.block_size))).decode()
+    Returns:
+        Base64 编码的 SM2 (C1C3C2) 密文。
+    """
+    if not plaintext or not public_key_b64:
+        raise ValueError("明文或公钥不能为空")
+
+    raw_pub = base64.b64decode(public_key_b64)
+    hex_pub = raw_pub.hex()
+    if hex_pub.startswith("04"):
+        hex_pub = hex_pub[2:]
+
+    if len(hex_pub) != 128:
+        raise ValueError(f"无效的 SM2 公钥长度: {len(hex_pub)} (应为 128 字符十六进制)")
+
+    crypt = sm2.CryptSM2(public_key=hex_pub, private_key="", mode=1)
+    cipher_bytes = crypt.encrypt(plaintext.encode("utf-8"))
+    if not cipher_bytes:
+        raise RuntimeError("SM2 加密失败（返回空密文）")
+
+    return base64.b64encode(cipher_bytes).decode("ascii")
+

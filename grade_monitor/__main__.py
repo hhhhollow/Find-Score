@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import re
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
@@ -13,9 +14,25 @@ from logging.handlers import RotatingFileHandler
 from requests import RequestException
 
 from .config import AppConfig, ConfigError, load_config
-from .notify import send_bark
-from .session import ApiError, Grade, JwxtSession, SessionExpired
-from .storage import CACHE_FILE, COOKIES_FILE, LOCK_FILE, LOG_FILE, atomic_write_json
+from .notify import send_alert, send_bark
+from .session import (
+    ApiError,
+    Grade,
+    JwxtSession,
+    SessionExpired,
+    SsoLoginError,
+    SsoVerificationRequired,
+)
+from .storage import (
+    CACHE_FILE,
+    COOKIES_FILE,
+    LOCK_FILE,
+    LOG_FILE,
+    STATUS_FILE,
+    atomic_write_json,
+    load_status,
+    save_status,
+)
 
 log = logging.getLogger("find-score")
 _YEAR_NAMES = ["大一", "大二", "大三", "大四", "大五", "大六", "大七"]
@@ -170,6 +187,74 @@ def _format_grade(grade: Grade, entry_year: int, old_score: str | None = None) -
     return "\n".join(lines)
 
 
+ALERT_COOLDOWN_SECONDS = 6 * 3600
+
+
+def record_success() -> None:
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S")
+    status = load_status()
+    status["status"] = "HEALTHY"
+    status["last_success_at"] = now_iso
+    status["consecutive_failures"] = 0
+    status["last_error"] = None
+    save_status(status)
+
+
+def handle_failure(error: Exception, cfg: AppConfig | None = None) -> None:
+    now = time.time()
+    now_iso = time.strftime("%Y-%m-%d %H:%M:%S")
+    status = load_status()
+
+    last_status = status.get("status", "HEALTHY")
+    last_notified = float(status.get("last_error_notified_at", 0) or 0)
+    failures = int(status.get("consecutive_failures", 0) or 0) + 1
+
+    status["status"] = "UNHEALTHY"
+    status["last_error"] = str(error)
+    status["last_error_at"] = now_iso
+    status["consecutive_failures"] = failures
+
+    cooldown = ALERT_COOLDOWN_SECONDS
+    if cfg and "alert_cooldown_hours" in cfg:
+        try:
+            cooldown = float(cfg["alert_cooldown_hours"]) * 3600
+        except (TypeError, ValueError):
+            pass
+
+    should_notify = (last_status == "HEALTHY") or (now - last_notified >= cooldown)
+
+    if should_notify and cfg is not None:
+        if isinstance(error, SsoVerificationRequired):
+            title = "⚠️ Find-Score 风控告警"
+            text = (
+                "教务系统会话已失效且触发风控验证（滑块/验证码/MFA）。\n"
+                "自动重登受阻，请在浏览器中登录后执行 'find-score cookie' 导入 Cookie。"
+            )
+        else:
+            title = "⚠️ Find-Score 监控异常"
+            text = f"成绩监控运行失败：{error}\n若持续失败请检查网络或执行 'find-score check' 排查。"
+
+        try:
+            bark = cfg["bark"]
+            sent = send_alert(
+                bark["key"],
+                text,
+                title=title,
+                server=bark["server"],
+                group=bark["group"],
+                sound="alarm",
+            )
+            if sent:
+                status["last_error_notified_at"] = now
+                log.info("已发送异常告警通知 (Bark)")
+            else:
+                log.warning("异常告警通知发送失败 (Bark 接口返回失败)")
+        except Exception as notify_err:
+            log.warning("发送异常告警通知发生错误: %s", notify_err)
+
+    save_status(status)
+
+
 def _fetch_grades(client: JwxtSession) -> list[Grade]:
     try:
         return client.fetch_all_grades()
@@ -191,8 +276,9 @@ def _send(cfg: AppConfig, text: str, title: str) -> bool:
     )
 
 
-def run_once() -> bool:
-    cfg = load_config()
+def run_once(cfg: AppConfig | None = None) -> bool:
+    if cfg is None:
+        cfg = load_config()
     jwxt = cfg["jwxt"]
 
     with JwxtSession(jwxt["username"], jwxt["password"], COOKIES_FILE) as client:
@@ -267,15 +353,27 @@ def run_once() -> bool:
 
 def main() -> int:
     os.umask(0o077)
+    cfg: AppConfig | None = None
     try:
         configure_logging()
-        with instance_lock():
-            return 0 if run_once() else 1
-    except (ConfigError, OSError, RuntimeError, RequestException) as error:
-        log.error("%s", error)
+        cfg = load_config()
+    except Exception as error:
+        log.error("初始化配置失败: %s", error)
         return 1
-    except Exception:
+
+    try:
+        with instance_lock():
+            if run_once(cfg):
+                record_success()
+                return 0
+            return 1
+    except (ConfigError, OSError, RuntimeError, RequestException, SsoLoginError) as error:
+        log.error("%s", error)
+        handle_failure(error, cfg)
+        return 1
+    except Exception as error:
         log.exception("查询失败")
+        handle_failure(error, cfg)
         return 1
 
 

@@ -5,7 +5,7 @@ description = "Minimal BISTU grade monitor with Bark notifications"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "pycryptodome>=3.20.0",
+    "gmssl>=3.2.2",
     "requests>=2.31.0",
 ]
 

@@ -1,6 +1,7 @@
 config.json
 grades_cache.json
 cookies.json
+status.json
 .grade_monitor.lock
 *.log
 *.log.*

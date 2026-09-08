@@ -7,6 +7,8 @@ from grade_monitor.session import (
     GRADE_PAGE_SIZE,
     ApiError,
     JwxtSession,
+    SsoLoginError,
+    SsoVerificationRequired,
     _build_session,
 )
 
@@ -89,16 +91,93 @@ class SessionResponseTests(unittest.TestCase):
         with self.assertRaisesRegex(ApiError, "重复页面"):
             client.fetch_all_grades()
 
-    def test_missing_or_invalid_captcha_response_fails_closed(self) -> None:
+    def test_sso_handshake_extracts_flow_key(self) -> None:
+        import urllib.parse
+        import json
         client = object.__new__(JwxtSession)
-        client.username = "2024012345"
         client.session = Mock()
-        response = Mock()
-        response.json.return_value = {}
+        cookie_payload = {
+            "code": 600901,
+            "msg": "没找到TGC",
+            "data": {"flowKey": "flow.123456", "service": "https://jwxt.bistu.edu.cn/..."},
+        }
+        client.session.cookies.get.return_value = urllib.parse.quote(json.dumps(cookie_payload))
+        response = Mock(status_code=302)
         client.session.get.return_value = response
 
-        with self.assertRaisesRegex(ApiError, "isNeed"):
-            client._need_captcha()
+        flow_key = client._fetch_sso_handshake()
+        self.assertEqual(flow_key, "flow.123456")
+
+    def test_sso_handshake_detects_captcha_risk(self) -> None:
+        import urllib.parse
+        import json
+        client = object.__new__(JwxtSession)
+        client.session = Mock()
+        cookie_payload = {
+            "code": 600902,
+            "data": {"captcha": "aliyun", "flowKey": "flow.123456"},
+        }
+        client.session.cookies.get.return_value = urllib.parse.quote(json.dumps(cookie_payload))
+        client.session.get.return_value = Mock(status_code=302)
+
+        with self.assertRaises(SsoVerificationRequired):
+            client._fetch_sso_handshake()
+
+    def test_sso_handshake_missing_cookie_raises(self) -> None:
+        client = object.__new__(JwxtSession)
+        client.session = Mock()
+        client.session.cookies.get.return_value = None
+        client.session.get.return_value = Mock(status_code=200)
+
+        with self.assertRaises(SsoLoginError):
+            client._fetch_sso_handshake()
+
+    def test_sso_public_key_success(self) -> None:
+        client = object.__new__(JwxtSession)
+        client.session = Mock()
+        resp = Mock(status_code=200)
+        resp.json.return_value = {
+            "code": 200,
+            "data": {"encrypt": {"algorithm": "sm2", "publicKey": "BN6l0...="}},
+        }
+        client.session.get.return_value = resp
+
+        self.assertEqual(client._fetch_public_key(), "BN6l0...=")
+
+    def test_sso_submit_login_risk_control_raises_verification(self) -> None:
+        client = object.__new__(JwxtSession)
+        client.username = "2024012616"
+        client.password = "secret"
+        client.session = Mock()
+        resp = Mock(status_code=200)
+        resp.json.return_value = {
+            "code": 160065,
+            "msg": "请先完成滑动验证码",
+            "data": {"captcha": "aliyun"},
+        }
+        client.session.post.return_value = resp
+
+        with patch("grade_monitor.session.encrypt_sm2", return_value="fake-cipher"):
+            with self.assertRaises(SsoVerificationRequired):
+                client._submit_login("flow.123", "fake-pub")
+
+    def test_sso_submit_login_bad_credentials_raises_login_error(self) -> None:
+        client = object.__new__(JwxtSession)
+        client.username = "2024012616"
+        client.password = "wrong"
+        client.session = Mock()
+        resp = Mock(status_code=200)
+        resp.json.return_value = {
+            "code": 170002,
+            "msg": "用户名或密码错误",
+            "data": None,
+        }
+        client.session.post.return_value = resp
+
+        with patch("grade_monitor.session.encrypt_sm2", return_value="fake-cipher"):
+            with self.assertRaises(SsoLoginError):
+                client._submit_login("flow.123", "fake-pub")
+
 
     def test_register_app_context_fails_closed(self) -> None:
         client = object.__new__(JwxtSession)

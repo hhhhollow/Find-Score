@@ -1,8 +1,8 @@
-"""BISTU CAS login and grade API access."""
+"""BISTU SSO login and grade API access."""
 
 import json
-import re
 import time
+import urllib.parse
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TypedDict
@@ -11,14 +11,16 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .crypto import encrypt_password
+from .crypto import encrypt_sm2
 from .storage import atomic_write_json
 
-CAS_HOST = "https://wxjw.bistu.edu.cn"
-CAS_LOGIN_PATH = "/authserver/login"
-CAS_CAPTCHA_CHECK = "/authserver/checkNeedCaptcha.htl"
+SSO_HOST = "https://sso.bistu.edu.cn"
+SSO_LOGIN_URL = f"{SSO_HOST}/login"
+SSO_RULES_URL = f"{SSO_HOST}/api/reset/rules"
+SSO_SUBMIT_URL = f"{SSO_HOST}/username-password/login"
+
 JWXT_BASE = "https://jwxt.bistu.edu.cn"
-JWXT_SERVICE = f"{JWXT_BASE}/jwapp/sys/emappagelog/modules/emappagelog/loginNew.do"
+JWXT_SERVICE = f"{JWXT_BASE}/jwapp/sys/yjsrzfwapp/bistuLogin/casLogin.do"
 CJZHCXAPP = f"{JWXT_BASE}/jwapp/sys/cjzhcxapp"
 CXWDCJ_URL = f"{CJZHCXAPP}/modules/wdcj/cxwdcj.do"
 DETAILS_URL = f"{CJZHCXAPP}/api/wdcj/details.do"
@@ -61,6 +63,14 @@ class ApiError(RuntimeError):
     """The grade system returned an invalid business response."""
 
 
+class SsoLoginError(RuntimeError):
+    """SSO 登录失败（认证或网络异常）。"""
+
+
+class SsoVerificationRequired(SsoLoginError):
+    """SSO 触发人机验证码、多因子认证或设备确认等风控。"""
+
+
 def _text(value: object, default: str = "") -> str:
     if value is None:
         return default
@@ -71,7 +81,7 @@ def _text(value: object, default: str = "") -> str:
 def _build_session() -> requests.Session:
     """Build a session that automatically retries GET requests only.
 
-    CAS credential submission is a POST and must never be retried by urllib3.
+    Credential submission is a POST and must never be retried by urllib3.
     Read-only grade POST requests have their own explicit retry loop below.
     """
     session = requests.Session()
@@ -122,17 +132,26 @@ class JwxtSession:
         try:
             with open(self.cookies_path, encoding="utf-8") as file:
                 data = json.load(file)
-            if not isinstance(data, list):
-                raise TypeError("cookie 文件必须是数组")
-            for cookie in data:
-                if not isinstance(cookie, dict):
-                    raise TypeError("cookie 项必须是对象")
-                self.session.cookies.set(
-                    str(cookie["name"]),
-                    str(cookie["value"]),
-                    domain=str(cookie.get("domain", "")),
-                    path=str(cookie.get("path", "/")),
-                )
+            if isinstance(data, list):
+                for cookie in data:
+                    if not isinstance(cookie, dict):
+                        continue
+                    self.session.cookies.set(
+                        str(cookie.get("name", "")),
+                        str(cookie.get("value", "")),
+                        domain=str(cookie.get("domain", "")),
+                        path=str(cookie.get("path", "/")),
+                    )
+            elif isinstance(data, dict):
+                for key, val in data.items():
+                    self.session.cookies.set(
+                        str(key),
+                        str(val),
+                        domain="jwxt.bistu.edu.cn",
+                        path="/",
+                    )
+            else:
+                raise TypeError("cookie 文件必须是数组或字典")
         except (OSError, ValueError, TypeError, KeyError):
             self.session.cookies.clear()
 
@@ -150,41 +169,120 @@ class JwxtSession:
         ]
         atomic_write_json(self.cookies_path, data)
 
-    def _need_captcha(self) -> bool:
-        """Return captcha requirement, failing closed if the check is unreliable."""
-        response = self.session.get(
-            f"{CAS_HOST}{CAS_CAPTCHA_CHECK}",
-            params={"username": self.username},
-            timeout=10,
-        )
-        response.raise_for_status()
+    def _fetch_sso_handshake(self) -> str:
+        """访问 SSO 登录页，提取 flowKey。"""
         try:
+            response = self.session.get(
+                SSO_LOGIN_URL,
+                params={"service": JWXT_SERVICE},
+                allow_redirects=False,
+                timeout=15,
+            )
+        except requests.RequestException as err:
+            raise SsoLoginError(f"访问 SSO 登录页失败: {err}") from err
+
+        cookie_info_raw = self.session.cookies.get("COOKIE_INFO")
+        if not cookie_info_raw and response.status_code in (301, 302, 303, 307):
+            loc = response.headers.get("Location")
+            if loc:
+                try:
+                    self.session.get(urllib.parse.urljoin(SSO_HOST, loc), timeout=15)
+                    cookie_info_raw = self.session.cookies.get("COOKIE_INFO")
+                except requests.RequestException:
+                    pass
+
+        if not cookie_info_raw:
+            raise SsoLoginError("SSO 握手失败：未获取到 COOKIE_INFO")
+
+        try:
+            info = json.loads(urllib.parse.unquote(cookie_info_raw))
+        except (ValueError, TypeError) as err:
+            raise SsoLoginError("SSO 握手失败：COOKIE_INFO 解析失败") from err
+
+        if not isinstance(info, dict):
+            raise SsoLoginError("SSO 握手响应结构异常")
+
+        data = info.get("data")
+        if isinstance(data, dict):
+            if data.get("captcha") or data.get("mfa"):
+                raise SsoVerificationRequired(
+                    f"SSO 触发风控验证 ({data.get('captcha') or data.get('mfa')})"
+                )
+            flow_key = data.get("flowKey")
+            if flow_key and isinstance(flow_key, str):
+                return flow_key
+
+        raise SsoLoginError(f"SSO 握手未返回有效的 flowKey (code={info.get('code')})")
+
+    def _fetch_public_key(self) -> str:
+        """获取国密 SM2 公钥。"""
+        try:
+            response = self.session.get(SSO_RULES_URL, timeout=15)
+            response.raise_for_status()
             payload = response.json()
-        except ValueError as error:
-            raise ApiError("验证码检测返回了无效 JSON") from error
-        if not isinstance(payload, Mapping) or "isNeed" not in payload:
-            raise ApiError("验证码检测响应缺少 isNeed")
+        except requests.RequestException as err:
+            raise SsoLoginError(f"获取 SSO 规则配置失败: {err}") from err
+        except ValueError as err:
+            raise SsoLoginError("SSO 规则配置返回了无效 JSON") from err
 
-        value = payload["isNeed"]
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, int) and value in (0, 1):
-            return bool(value)
-        if isinstance(value, str):
-            normalized = value.strip().lower()
-            if normalized in {"true", "1"}:
-                return True
-            if normalized in {"false", "0"}:
-                return False
-        raise ApiError("验证码检测响应中的 isNeed 类型无效")
+        if not isinstance(payload, dict) or payload.get("code") != 200:
+            code = payload.get("code") if isinstance(payload, dict) else "?"
+            raise SsoLoginError(f"获取 SSO 规则配置失败 (code={code})")
 
-    @staticmethod
-    def _parse_login_form(html: str) -> tuple[str | None, str]:
-        execution = re.search(r'name="execution"\s+value="([^"]+)"', html)
-        if not execution:
-            return None, ""
-        salt = re.search(r'id="pwdEncryptSalt"\s+value="([^"]*)"', html)
-        return execution.group(1), salt.group(1) if salt else ""
+        data = payload.get("data")
+        encrypt_info = data.get("encrypt") if isinstance(data, dict) else None
+        public_key = encrypt_info.get("publicKey") if isinstance(encrypt_info, dict) else None
+        if not public_key or not isinstance(public_key, str):
+            raise SsoLoginError("SSO 规则配置未返回有效 publicKey")
+
+        return public_key
+
+    def _submit_login(self, flow_key: str, public_key: str) -> str:
+        """提交国密 SM2 加密的凭据，返回 Ticket 消费服务链接。"""
+        try:
+            encrypted_password = encrypt_sm2(self.password, public_key)
+        except Exception as err:
+            raise SsoLoginError(f"国密 SM2 密码加密失败: {err}") from err
+
+        payload = {
+            "flowKey": flow_key,
+            "username": self.username,
+            "password": encrypted_password,
+        }
+        try:
+            response = self.session.post(
+                SSO_SUBMIT_URL,
+                json=payload,
+                timeout=20,
+            )
+            response.raise_for_status()
+            res = response.json()
+        except requests.RequestException as err:
+            raise SsoLoginError(f"提交 SSO 凭据网络异常: {err}") from err
+        except ValueError as err:
+            raise SsoLoginError("SSO 登录响应非 JSON") from err
+
+        if not isinstance(res, dict):
+            raise SsoLoginError("SSO 登录响应结构异常")
+
+        code = res.get("code")
+        msg = str(res.get("msg", ""))
+        data = res.get("data")
+
+        if code == 666666 and isinstance(data, dict):
+            service_url = data.get("service")
+            if not service_url or not isinstance(service_url, str):
+                raise SsoLoginError("SSO 登录成功但未返回 service URL")
+            return service_url
+
+        if isinstance(data, dict) and (data.get("captcha") or data.get("mfa")):
+            raise SsoVerificationRequired(
+                f"SSO 触发人机验证码或风控 ({data.get('captcha') or data.get('mfa')}): {msg}"
+            )
+        if any(kw in msg for kw in ("验证码", "滑动", "人机", "二次验证", "MFA", "常用设备", "设备")):
+            raise SsoVerificationRequired(f"SSO 触发人机验证码或风控: {msg}")
+
+        raise SsoLoginError(f"SSO 登录失败 (code={code}): {msg}")
 
     def _register_app_context(self) -> bool:
         try:
@@ -199,44 +297,27 @@ class JwxtSession:
         return 200 <= response.status_code < 300
 
     def login(self) -> bool:
-        """Log in once. The credential POST is deliberately never auto-retried."""
+        """执行全新 SSO 登录流程。"""
         self.session.cookies.clear()
-        try:
-            response = self.session.get(
-                f"{CAS_HOST}{CAS_LOGIN_PATH}",
-                params={"service": JWXT_SERVICE},
-                timeout=15,
-            )
-            response.raise_for_status()
-            execution, salt = self._parse_login_form(response.text)
-            if not execution or self._need_captcha():
-                return False
+        flow_key = self._fetch_sso_handshake()
+        public_key = self._fetch_public_key()
+        service_target = self._submit_login(flow_key, public_key)
 
-            response = self.session.post(
-                f"{CAS_HOST}{CAS_LOGIN_PATH}",
-                params={"service": JWXT_SERVICE},
-                data={
-                    "username": self.username,
-                    "password": encrypt_password(self.password, salt),
-                    "captcha": "",
-                    "_eventId": "submit",
-                    "cllt": "userNameLogin",
-                    "dllt": "generalLogin",
-                    "lt": "",
-                    "execution": execution,
-                },
-                timeout=20,
-                allow_redirects=True,
-            )
+        if not service_target.startswith("http"):
+            service_target = urllib.parse.urljoin(SSO_HOST, service_target)
+
+        try:
+            response = self.session.get(service_target, allow_redirects=True, timeout=20)
             response.raise_for_status()
-        except (requests.RequestException, ApiError, ValueError):
-            return False
+        except requests.RequestException as err:
+            raise SsoLoginError(f"消费 SSO Ticket 失败: {err}") from err
 
         if JWXT_BASE not in response.url or not self._register_app_context():
-            return False
+            raise SsoLoginError(f"教务系统会话注册失败 (当前 URL: {response.url})")
 
         self._save_cookies()
         return True
+
 
     def _post_json(
         self,
