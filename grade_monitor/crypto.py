@@ -4,6 +4,7 @@
 """
 
 import base64
+
 from gmssl import sm2
 
 
@@ -21,9 +22,7 @@ def encrypt_sm2(plaintext: str, public_key_b64: str) -> str:
         raise ValueError("明文或公钥不能为空")
 
     raw_pub = base64.b64decode(public_key_b64)
-    hex_pub = raw_pub.hex()
-    if hex_pub.startswith("04"):
-        hex_pub = hex_pub[2:]
+    hex_pub = raw_pub.hex().removeprefix("04")
 
     if len(hex_pub) != 128:
         raise ValueError(f"无效的 SM2 公钥长度: {len(hex_pub)} (应为 128 字符十六进制)")
@@ -34,4 +33,3 @@ def encrypt_sm2(plaintext: str, public_key_b64: str) -> str:
         raise RuntimeError("SM2 加密失败（返回空密文）")
 
     return base64.b64encode(cipher_bytes).decode("ascii")
-

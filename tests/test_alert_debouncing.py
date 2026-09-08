@@ -1,9 +1,10 @@
-import unittest
-from unittest.mock import patch, MagicMock
 import time
+import unittest
+from unittest.mock import MagicMock, patch
 
 from grade_monitor.__main__ import handle_failure, record_success
-from grade_monitor.session import SsoVerificationRequired, SsoLoginError
+from grade_monitor.session import SsoVerificationRequired
+
 
 class AlertDebouncingTests(unittest.TestCase):
     @patch("grade_monitor.__main__.save_status")
@@ -99,6 +100,7 @@ class AlertDebouncingTests(unittest.TestCase):
         self.assertEqual(saved["status"], "HEALTHY")
         self.assertEqual(saved["consecutive_failures"], 0)
         self.assertIsNone(saved["last_error"])
+
 
 if __name__ == "__main__":
     unittest.main()

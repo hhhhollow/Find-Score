@@ -28,7 +28,6 @@ from .storage import (
     COOKIES_FILE,
     LOCK_FILE,
     LOG_FILE,
-    STATUS_FILE,
     atomic_write_json,
     load_status,
     save_status,
@@ -249,7 +248,7 @@ def handle_failure(error: Exception, cfg: AppConfig | None = None) -> None:
                 log.info("已发送异常告警通知 (Bark)")
             else:
                 log.warning("异常告警通知发送失败 (Bark 接口返回失败)")
-        except Exception as notify_err:
+        except (KeyError, TypeError, ValueError, RequestException) as notify_err:
             log.warning("发送异常告警通知发生错误: %s", notify_err)
 
     save_status(status)
@@ -357,7 +356,7 @@ def main() -> int:
     try:
         configure_logging()
         cfg = load_config()
-    except Exception as error:
+    except (ConfigError, OSError) as error:
         log.error("初始化配置失败: %s", error)
         return 1
 
