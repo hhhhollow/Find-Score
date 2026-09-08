@@ -4,7 +4,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from grade_monitor.__main__ import _snapshot, _weighted_average, main, run_once
+from grade_monitor.__main__ import (
+    _failure_notification_due,
+    _snapshot,
+    _weighted_average,
+    main,
+    run_once,
+)
 from grade_monitor.config import ConfigError, load_config
 from grade_monitor.storage import CACHE_FILE
 
@@ -66,6 +72,60 @@ class CoreTests(unittest.TestCase):
             path.write_text(json.dumps(raw), encoding="utf-8")
             with self.assertRaisesRegex(ConfigError, "bark.server"):
                 load_config(path)
+
+    @patch("grade_monitor.__main__.FAILURE_NOTIFY_FILE")
+    @patch("grade_monitor.__main__.time.time", return_value=10_000.0)
+    def test_failure_notification_cooldown(
+        self,
+        time_mock: MagicMock,
+        marker_mock: MagicMock,
+    ) -> None:
+        marker_mock.stat.return_value.st_mtime = 10_000.0 - 29 * 60
+        self.assertFalse(_failure_notification_due())
+
+        marker_mock.stat.return_value.st_mtime = 10_000.0 - 31 * 60
+        self.assertTrue(_failure_notification_due())
+        time_mock.assert_called()
+
+    @patch("grade_monitor.__main__._record_failure_notification")
+    @patch("grade_monitor.__main__._failure_notification_due", return_value=True)
+    @patch("grade_monitor.__main__._send", return_value=True)
+    @patch("grade_monitor.__main__.COOKIES_FILE")
+    @patch("grade_monitor.__main__.JwxtSession")
+    @patch("grade_monitor.__main__.load_config")
+    def test_login_failure_sends_bark(
+        self,
+        load_config_mock: MagicMock,
+        session_class: MagicMock,
+        cookies_file_mock: MagicMock,
+        send_mock: MagicMock,
+        due_mock: MagicMock,
+        record_mock: MagicMock,
+    ) -> None:
+        load_config_mock.return_value = {
+            "jwxt": {"username": "2024012345", "password": "secret"},
+            "bark": {
+                "key": "abc",
+                "server": "https://api.day.app",
+                "group": "Find-Score",
+                "sound": "bell",
+            },
+            "interval_minutes": 20,
+        }
+        cookies_file_mock.exists.return_value = False
+        client = session_class.return_value.__enter__.return_value
+        client.login.return_value = False
+
+        with self.assertRaisesRegex(RuntimeError, "教务系统登录失败"):
+            run_once()
+
+        due_mock.assert_called_once_with()
+        send_mock.assert_called_once_with(
+            load_config_mock.return_value,
+            "教务系统登录失败\n\nFind-Score 后续查询会继续重试。",
+            "⚠️ Find-Score 查询失败",
+        )
+        record_mock.assert_called_once_with()
 
     @patch("grade_monitor.__main__._send")
     @patch("grade_monitor.__main__.atomic_write_json")
