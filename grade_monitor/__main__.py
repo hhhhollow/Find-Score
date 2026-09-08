@@ -28,7 +28,6 @@ from .storage import (
     COOKIES_FILE,
     LOCK_FILE,
     LOG_FILE,
-    STATUS_FILE,
     atomic_write_json,
     load_status,
     save_status,
