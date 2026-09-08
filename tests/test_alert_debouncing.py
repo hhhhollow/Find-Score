@@ -1,6 +1,6 @@
+import time
 import unittest
 from unittest.mock import MagicMock, patch
-import time
 
 from grade_monitor.__main__ import handle_failure, record_success
 from grade_monitor.session import SsoVerificationRequired
