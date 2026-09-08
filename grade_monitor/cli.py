@@ -1,8 +1,8 @@
 """Unified command-line interface for Find-Score."""
 
 import argparse
-import sys
 import json
+import sys
 import time
 from collections.abc import Sequence
 from importlib.metadata import PackageNotFoundError, version
@@ -105,7 +105,7 @@ def _parse_cookie_input(raw: str) -> list[dict[str, str]]:
     if not raw:
         raise ValueError("输入的 Cookie 不能为空")
 
-    if raw.startswith("[") or raw.startswith("{"):
+    if raw.startswith(("[", "{")):
         try:
             data = json.loads(raw)
             if isinstance(data, list):
@@ -182,9 +182,9 @@ def _verify_cookies(cookies_list: list[dict[str, str]]) -> bool:
         )
         if r.status_code == 200 and "json" in r.headers.get("Content-Type", "").lower():
             payload = r.json()
-            return payload.get("code") == "0"
-    except Exception:
-        pass
+            return isinstance(payload, dict) and payload.get("code") == "0"
+    except (requests.RequestException, ValueError):
+        return False
     return False
 
 
@@ -232,7 +232,7 @@ def _handle_cookie(args: argparse.Namespace) -> int:
     try:
         with open(COOKIES_FILE, encoding="utf-8") as file:
             data = json.load(file)
-    except Exception as err:
+    except (OSError, ValueError) as err:
         print(f"状态: 文件损坏 ({err})", file=sys.stderr)
         return 1
 
@@ -310,7 +310,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser.error(f"未知命令: {args.command}")
     return 2
-
 
 
 if __name__ == "__main__":
