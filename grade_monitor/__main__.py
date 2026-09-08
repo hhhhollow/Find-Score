@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import re
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
@@ -15,11 +16,19 @@ from requests import RequestException
 from .config import AppConfig, ConfigError, load_config
 from .notify import send_bark
 from .session import ApiError, Grade, JwxtSession, SessionExpired
-from .storage import CACHE_FILE, COOKIES_FILE, LOCK_FILE, LOG_FILE, atomic_write_json
+from .storage import (
+    CACHE_FILE,
+    COOKIES_FILE,
+    FAILURE_NOTIFY_FILE,
+    LOCK_FILE,
+    LOG_FILE,
+    atomic_write_json,
+)
 
 log = logging.getLogger("find-score")
 _YEAR_NAMES = ["大一", "大二", "大三", "大四", "大五", "大六", "大七"]
 _SEM_NAMES = {"1": "第一学期", "2": "第二学期", "3": "小学期"}
+_FAILURE_NOTIFY_COOLDOWN_SECONDS = 30 * 60
 
 
 def configure_logging() -> None:
@@ -191,18 +200,62 @@ def _send(cfg: AppConfig, text: str, title: str) -> bool:
     )
 
 
+def _failure_notification_due() -> bool:
+    try:
+        age = time.time() - FAILURE_NOTIFY_FILE.stat().st_mtime
+    except FileNotFoundError:
+        return True
+    except OSError as error:
+        log.warning("无法读取失败通知冷却状态，将尝试发送: %s", error)
+        return True
+    return age >= _FAILURE_NOTIFY_COOLDOWN_SECONDS
+
+
+def _record_failure_notification() -> None:
+    try:
+        FAILURE_NOTIFY_FILE.touch(mode=0o600, exist_ok=True)
+    except OSError as error:
+        log.warning("无法记录失败通知冷却状态: %s", error)
+
+
+def _clear_failure_notification() -> None:
+    try:
+        FAILURE_NOTIFY_FILE.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        log.warning("无法清除失败通知冷却状态: %s", error)
+
+
+def _notify_query_failure(cfg: AppConfig, error: BaseException) -> None:
+    if not _failure_notification_due():
+        log.info("查询失败通知处于 30 分钟冷却期，跳过 Bark")
+        return
+
+    text = f"{error}\n\nFind-Score 后续查询会继续重试。"
+    if _send(cfg, text, "⚠️ Find-Score 查询失败"):
+        _record_failure_notification()
+    else:
+        log.warning("查询失败，且 Bark 错误通知发送失败")
+
+
 def run_once() -> bool:
     cfg = load_config()
     jwxt = cfg["jwxt"]
 
     with JwxtSession(jwxt["username"], jwxt["password"], COOKIES_FILE) as client:
-        if not COOKIES_FILE.exists() and not client.login():
-            raise RuntimeError("教务系统登录失败")
+        try:
+            if not COOKIES_FILE.exists() and not client.login():
+                raise RuntimeError("教务系统登录失败")
 
-        grades = _fetch_grades(client)
-        if not grades:
-            raise RuntimeError("成绩接口返回空列表")
+            grades = _fetch_grades(client)
+            if not grades:
+                raise RuntimeError("成绩接口返回空列表")
+        except (OSError, RuntimeError, RequestException, SessionExpired) as error:
+            _notify_query_failure(cfg, error)
+            raise
 
+        _clear_failure_notification()
         new_snapshot = _snapshot(grades)
         old_snapshot = load_cache()
 
