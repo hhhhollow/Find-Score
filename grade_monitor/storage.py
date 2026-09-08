@@ -24,6 +24,7 @@ CACHE_FILE = BASE_DIR / "grades_cache.json"
 COOKIES_FILE = BASE_DIR / "cookies.json"
 LOG_FILE = BASE_DIR / "grade_monitor.log"
 LOCK_FILE = BASE_DIR / ".grade_monitor.lock"
+FAILURE_NOTIFY_FILE = BASE_DIR / ".failure_notification"
 
 
 def atomic_write_json(path: Path, data: Any, mode: int = 0o600) -> None:
