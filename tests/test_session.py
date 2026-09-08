@@ -1,4 +1,6 @@
+import json
 import unittest
+import urllib.parse
 from unittest.mock import Mock, patch
 
 import requests
@@ -92,8 +94,6 @@ class SessionResponseTests(unittest.TestCase):
             client.fetch_all_grades()
 
     def test_sso_handshake_extracts_flow_key(self) -> None:
-        import urllib.parse
-        import json
         client = object.__new__(JwxtSession)
         client.session = Mock()
         cookie_payload = {
@@ -109,8 +109,6 @@ class SessionResponseTests(unittest.TestCase):
         self.assertEqual(flow_key, "flow.123456")
 
     def test_sso_handshake_detects_captcha_risk(self) -> None:
-        import urllib.parse
-        import json
         client = object.__new__(JwxtSession)
         client.session = Mock()
         cookie_payload = {
@@ -157,9 +155,11 @@ class SessionResponseTests(unittest.TestCase):
         }
         client.session.post.return_value = resp
 
-        with patch("grade_monitor.session.encrypt_sm2", return_value="fake-cipher"):
-            with self.assertRaises(SsoVerificationRequired):
-                client._submit_login("flow.123", "fake-pub")
+        with (
+            patch("grade_monitor.session.encrypt_sm2", return_value="fake-cipher"),
+            self.assertRaises(SsoVerificationRequired),
+        ):
+            client._submit_login("flow.123", "fake-pub")
 
     def test_sso_submit_login_bad_credentials_raises_login_error(self) -> None:
         client = object.__new__(JwxtSession)
@@ -174,10 +174,11 @@ class SessionResponseTests(unittest.TestCase):
         }
         client.session.post.return_value = resp
 
-        with patch("grade_monitor.session.encrypt_sm2", return_value="fake-cipher"):
-            with self.assertRaises(SsoLoginError):
-                client._submit_login("flow.123", "fake-pub")
-
+        with (
+            patch("grade_monitor.session.encrypt_sm2", return_value="fake-cipher"),
+            self.assertRaises(SsoLoginError),
+        ):
+            client._submit_login("flow.123", "fake-pub")
 
     def test_register_app_context_fails_closed(self) -> None:
         client = object.__new__(JwxtSession)
