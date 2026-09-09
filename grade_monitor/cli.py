@@ -156,36 +156,39 @@ def _parse_cookie_input(raw: str) -> list[dict[str, str]]:
 
 def _verify_cookies(cookies_list: list[dict[str, str]]) -> bool:
     s = requests.Session()
-    for c in cookies_list:
-        s.cookies.set(
-            c["name"],
-            c["value"],
-            domain=c.get("domain", "jwxt.bistu.edu.cn"),
-            path=c.get("path", "/"),
-        )
-    s.headers.update(
-        {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            "Referer": "https://jwxt.bistu.edu.cn/jwapp/sys/homeapp/home/index.html?contextPath=/jwapp",
-        }
-    )
     try:
-        r = s.post(
-            "https://jwxt.bistu.edu.cn/jwapp/sys/cjzhcxapp/modules/wdcj/cxwdcj.do",
-            data={"pageSize": "1", "pageNumber": "1"},
-            timeout=10,
-            allow_redirects=False,
+        for c in cookies_list:
+            s.cookies.set(
+                c["name"],
+                c["value"],
+                domain=c.get("domain", "jwxt.bistu.edu.cn"),
+                path=c.get("path", "/"),
+            )
+        s.headers.update(
+            {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Referer": "https://jwxt.bistu.edu.cn/jwapp/sys/homeapp/home/index.html?contextPath=/jwapp",
+            }
         )
-        if r.status_code == 200 and "json" in r.headers.get("Content-Type", "").lower():
-            payload = r.json()
-            return isinstance(payload, dict) and payload.get("code") == "0"
-    except (requests.RequestException, ValueError):
+        try:
+            r = s.post(
+                "https://jwxt.bistu.edu.cn/jwapp/sys/cjzhcxapp/modules/wdcj/cxwdcj.do",
+                data={"pageSize": "1", "pageNumber": "1"},
+                timeout=10,
+                allow_redirects=False,
+            )
+            if r.status_code == 200 and "json" in r.headers.get("Content-Type", "").lower():
+                payload = r.json()
+                return isinstance(payload, dict) and payload.get("code") == "0"
+        except (requests.RequestException, ValueError):
+            return False
         return False
-    return False
+    finally:
+        s.close()
 
 
 def _handle_cookie(args: argparse.Namespace) -> int:
@@ -213,14 +216,17 @@ def _handle_cookie(args: argparse.Namespace) -> int:
             print(f"❌ 解析失败: {err}", file=sys.stderr)
             return 1
 
+        print("正在校验 Cookie 有效性...")
+        if not _verify_cookies(parsed):
+            print(
+                "❌ Cookie 校验失败，未覆盖本地 Cookie；请重新登录教务系统后再导入。",
+                file=sys.stderr,
+            )
+            return 1
+
         atomic_write_json(COOKIES_FILE, parsed)
         print(f"💾 已成功保存 {len(parsed)} 个 Cookie 至: {COOKIES_FILE}")
-
-        print("正在校验 Cookie 有效性...")
-        if _verify_cookies(parsed):
-            print("✅ 校验成功：Cookie 有效，教务系统鉴权通过！")
-        else:
-            print("⚠️ 提示：教务系统接口返回未登录或跳转，Cookie 可能已失效或缺少必要字段。")
+        print("✅ 校验成功：Cookie 有效，教务系统鉴权通过！")
         return 0
 
     # Default: show cookie status

@@ -109,6 +109,21 @@ class CliTests(unittest.TestCase):
             self.assertIn("已成功保存", text)
             self.assertIn("校验成功", text)
 
+    def test_cookie_import_failure_preserves_existing_session(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cookie_path = Path(directory) / "cookies.json"
+            original = '[{"name": "_WEU", "value": "working"}]'
+            cookie_path.write_text(original, encoding="utf-8")
+
+            with (
+                patch.object(cli, "COOKIES_FILE", cookie_path),
+                patch.object(cli, "_verify_cookies", return_value=False),
+            ):
+                ret = cli.main(["cookie", "-i", "_WEU=expired; GS_SESSIONID=bad"])
+
+            self.assertEqual(ret, 1)
+            self.assertEqual(cookie_path.read_text(encoding="utf-8"), original)
+
     def test_cookie_clear_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             cookie_path = Path(directory) / "cookies.json"
@@ -122,4 +137,3 @@ class CliTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
