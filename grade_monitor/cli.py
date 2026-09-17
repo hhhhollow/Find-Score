@@ -44,8 +44,9 @@ def _show_config() -> int:
     print("配置状态: 有效")
     print(f"学号: {_mask_username(cfg['jwxt']['username'])}")
     print(f"查询间隔: {cfg['interval_minutes']} 分钟")
-    if cfg.get("alert_cooldown_hours") is not None:
-        print(f"告警冷却: {cfg['alert_cooldown_hours']:g} 小时")
+    cooldown = cfg.get("alert_cooldown_hours")
+    if cooldown is not None:
+        print(f"告警冷却: {cooldown:g} 小时")
     bark = cfg["bark"]
     print(f"Bark: {bark['server']} | {bark['group']} | {bark['sound']}")
 

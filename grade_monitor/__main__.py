@@ -14,7 +14,7 @@ from logging.handlers import RotatingFileHandler
 
 from requests import RequestException
 
-from .config import AppConfig, ConfigError, DEFAULT_ALERT_COOLDOWN_HOURS, load_config
+from .config import DEFAULT_ALERT_COOLDOWN_HOURS, AppConfig, ConfigError, load_config
 from .notify import send_alert, send_bark, send_recovery
 from .session import (
     ApiError,
