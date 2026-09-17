@@ -36,6 +36,34 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(cfg["jwxt"]["username"], "2024012345")
         self.assertEqual(cfg["bark"]["server"], "https://api.day.app")
         self.assertEqual(cfg["interval_minutes"], 10)
+        self.assertEqual(cfg["alert_cooldown_hours"], 6.0)
+
+    def test_custom_alert_cooldown_hours_config(self) -> None:
+        raw = {
+            "jwxt": {"username": "2024012345", "password": "secret"},
+            "bark": {"key": "abc"},
+            "interval_minutes": 10,
+            "alert_cooldown_hours": 2.5,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            cfg = load_config(path)
+        self.assertEqual(cfg["alert_cooldown_hours"], 2.5)
+
+    def test_invalid_alert_cooldown_hours_is_rejected(self) -> None:
+        for invalid in (0, -1, "invalid", True):
+            with self.subTest(invalid=invalid):
+                raw = {
+                    "jwxt": {"username": "2024012345", "password": "secret"},
+                    "bark": {"key": "abc"},
+                    "alert_cooldown_hours": invalid,
+                }
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "config.json"
+                    path.write_text(json.dumps(raw), encoding="utf-8")
+                    with self.assertRaisesRegex(ConfigError, "alert_cooldown_hours"):
+                        load_config(path)
 
     def test_empty_bark_key_after_normalization_is_rejected(self) -> None:
         raw = {

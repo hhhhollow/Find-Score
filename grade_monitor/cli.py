@@ -44,6 +44,8 @@ def _show_config() -> int:
     print("配置状态: 有效")
     print(f"学号: {_mask_username(cfg['jwxt']['username'])}")
     print(f"查询间隔: {cfg['interval_minutes']} 分钟")
+    if cfg.get("alert_cooldown_hours") is not None:
+        print(f"告警冷却: {cfg['alert_cooldown_hours']:g} 小时")
     bark = cfg["bark"]
     print(f"Bark: {bark['server']} | {bark['group']} | {bark['sound']}")
 
@@ -154,7 +156,7 @@ def _parse_cookie_input(raw: str) -> list[dict[str, str]]:
     return result
 
 
-def _verify_cookies(cookies_list: list[dict[str, str]]) -> bool:
+def _verify_cookies(cookies_list: list[dict[str, str]], retries: int = 2) -> bool:
     s = requests.Session()
     try:
         for c in cookies_list:
@@ -174,18 +176,26 @@ def _verify_cookies(cookies_list: list[dict[str, str]]) -> bool:
                 "Referer": "https://jwxt.bistu.edu.cn/jwapp/sys/homeapp/home/index.html?contextPath=/jwapp",
             }
         )
-        try:
-            r = s.post(
-                "https://jwxt.bistu.edu.cn/jwapp/sys/cjzhcxapp/modules/wdcj/cxwdcj.do",
-                data={"pageSize": "1", "pageNumber": "1"},
-                timeout=10,
-                allow_redirects=False,
-            )
-            if r.status_code == 200 and "json" in r.headers.get("Content-Type", "").lower():
-                payload = r.json()
-                return isinstance(payload, dict) and payload.get("code") == "0"
-        except (requests.RequestException, ValueError):
-            return False
+        attempts = max(1, retries)
+        for attempt in range(attempts):
+            try:
+                r = s.post(
+                    "https://jwxt.bistu.edu.cn/jwapp/sys/cjzhcxapp/modules/wdcj/cxwdcj.do",
+                    data={"pageSize": "1", "pageNumber": "1"},
+                    timeout=10,
+                    allow_redirects=False,
+                )
+                if r.status_code in (301, 302, 401, 403):
+                    return False
+                if r.status_code == 200 and "json" in r.headers.get("Content-Type", "").lower():
+                    payload = r.json()
+                    return isinstance(payload, dict) and payload.get("code") == "0"
+            except requests.RequestException:
+                if attempt + 1 >= attempts:
+                    return False
+                time.sleep(1)
+            except ValueError:
+                return False
         return False
     finally:
         s.close()

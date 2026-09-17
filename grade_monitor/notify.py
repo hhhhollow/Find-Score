@@ -76,3 +76,26 @@ def send_alert(
         retries=retries,
     )
 
+
+def send_recovery(
+    key: str,
+    text: str,
+    *,
+    title: str = "🟢 Find-Score 恢复正常",
+    server: str = "https://api.day.app",
+    group: str = "Find-Score",
+    sound: str = "bell",
+    retries: int = 3,
+) -> bool:
+    """发送服务自愈与恢复正常通知。"""
+    return send_bark(
+        key,
+        text,
+        title=title,
+        server=server,
+        group=group,
+        sound=sound,
+        retries=retries,
+    )
+
+

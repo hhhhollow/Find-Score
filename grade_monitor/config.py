@@ -3,12 +3,13 @@
 import json
 import math
 from pathlib import Path
-from typing import TypedDict
+from typing import NotRequired, TypedDict
 from urllib.parse import urlsplit
 
 from .storage import CONFIG_FILE
 
 DEFAULT_INTERVAL_MINUTES = 20
+DEFAULT_ALERT_COOLDOWN_HOURS = 6.0
 
 
 class JwxtConfig(TypedDict):
@@ -27,6 +28,7 @@ class AppConfig(TypedDict):
     jwxt: JwxtConfig
     bark: BarkConfig
     interval_minutes: int
+    alert_cooldown_hours: NotRequired[float]
 
 
 class ConfigError(ValueError):
@@ -62,6 +64,25 @@ def _positive_int(value: object, field: str) -> int:
 
     if result <= 0:
         raise ConfigError(f"{field} 必须是正整数")
+    return result
+
+
+def _positive_float(value: object, field: str) -> float:
+    if isinstance(value, bool):
+        raise ConfigError(f"{field} 必须是正数")
+
+    if isinstance(value, (int, float)):
+        result = float(value)
+    elif isinstance(value, str):
+        try:
+            result = float(value.strip())
+        except ValueError as error:
+            raise ConfigError(f"{field} 必须是正数") from error
+    else:
+        raise ConfigError(f"{field} 必须是正数")
+
+    if not math.isfinite(result) or result <= 0:
+        raise ConfigError(f"{field} 必须是正数")
     return result
 
 
@@ -105,6 +126,9 @@ def load_config(path: Path = CONFIG_FILE) -> AppConfig:
     if any(character in key for character in "/?#"):
         raise ConfigError("bark.key 必须是单段 key")
 
+    cooldown_raw = raw.get("alert_cooldown_hours", DEFAULT_ALERT_COOLDOWN_HOURS)
+    alert_cooldown = _positive_float(cooldown_raw, "alert_cooldown_hours")
+
     return {
         "jwxt": {
             "username": _text(jwxt.get("username"), "jwxt.username"),
@@ -120,4 +144,5 @@ def load_config(path: Path = CONFIG_FILE) -> AppConfig:
             raw.get("interval_minutes", DEFAULT_INTERVAL_MINUTES),
             "interval_minutes",
         ),
+        "alert_cooldown_hours": alert_cooldown,
     }

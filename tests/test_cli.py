@@ -5,6 +5,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
+
 from grade_monitor import cli
 
 
@@ -133,6 +135,44 @@ class CliTests(unittest.TestCase):
                 ret = cli.main(["cookie", "--clear"])
                 self.assertEqual(ret, 0)
                 self.assertFalse(cookie_path.exists())
+
+    @patch("grade_monitor.cli.time.sleep")
+    @patch("requests.Session.post")
+    def test_verify_cookies_retries_on_network_error(
+        self,
+        mock_post: unittest.mock.MagicMock,
+        mock_sleep: unittest.mock.MagicMock,
+    ) -> None:
+        mock_success = unittest.mock.MagicMock()
+        mock_success.status_code = 200
+        mock_success.headers = {"Content-Type": "application/json;charset=UTF-8"}
+        mock_success.json.return_value = {"code": "0"}
+
+        mock_post.side_effect = [requests.RequestException("Connection reset"), mock_success]
+
+        cookies = [{"name": "_WEU", "value": "xyz"}]
+        result = cli._verify_cookies(cookies, retries=2)
+        self.assertTrue(result)
+        self.assertEqual(mock_post.call_count, 2)
+        mock_sleep.assert_called_once_with(1)
+
+    @patch("grade_monitor.cli.time.sleep")
+    @patch("requests.Session.post")
+    def test_verify_cookies_aborts_on_auth_failure(
+        self,
+        mock_post: unittest.mock.MagicMock,
+        mock_sleep: unittest.mock.MagicMock,
+    ) -> None:
+        mock_unauth = unittest.mock.MagicMock()
+        mock_unauth.status_code = 401
+
+        mock_post.return_value = mock_unauth
+
+        cookies = [{"name": "_WEU", "value": "xyz"}]
+        result = cli._verify_cookies(cookies, retries=2)
+        self.assertFalse(result)
+        self.assertEqual(mock_post.call_count, 1)
+        mock_sleep.assert_not_called()
 
 
 if __name__ == "__main__":

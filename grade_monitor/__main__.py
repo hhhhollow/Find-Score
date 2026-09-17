@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import re
+import sys
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -13,8 +14,8 @@ from logging.handlers import RotatingFileHandler
 
 from requests import RequestException
 
-from .config import AppConfig, ConfigError, load_config
-from .notify import send_alert, send_bark
+from .config import AppConfig, ConfigError, DEFAULT_ALERT_COOLDOWN_HOURS, load_config
+from .notify import send_alert, send_bark, send_recovery
 from .session import (
     ApiError,
     Grade,
@@ -46,8 +47,10 @@ def configure_logging() -> None:
         "%(asctime)s %(levelname)s %(message)s",
         "%Y-%m-%d %H:%M:%S",
     )
-    console = logging.StreamHandler()
-    console.setFormatter(formatter)
+    if sys.stderr.isatty():
+        console = logging.StreamHandler()
+        console.setFormatter(formatter)
+        log.addHandler(console)
     file_handler = RotatingFileHandler(
         LOG_FILE,
         maxBytes=2 * 1024 * 1024,
@@ -55,8 +58,11 @@ def configure_logging() -> None:
         encoding="utf-8",
     )
     file_handler.setFormatter(formatter)
-    log.addHandler(console)
     log.addHandler(file_handler)
+
+
+class LockContentionError(RuntimeError):
+    """Raised when another instance of Find-Score is already running."""
 
 
 @contextmanager
@@ -66,7 +72,7 @@ def instance_lock() -> Iterator[None]:
         try:
             fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as error:
-            raise RuntimeError("已有 Find-Score 查询正在运行") from error
+            raise LockContentionError("已有 Find-Score 查询正在运行") from error
         file.write(str(os.getpid()))
         file.flush()
         yield
@@ -186,16 +192,71 @@ def _format_grade(grade: Grade, entry_year: int, old_score: str | None = None) -
     return "\n".join(lines)
 
 
-ALERT_COOLDOWN_SECONDS = 6 * 3600
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        result = float(value)  # type: ignore[arg-type]
+        return result if math.isfinite(result) else default
+    except (TypeError, ValueError):
+        return default
 
 
-def record_success() -> None:
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        if isinstance(value, float):
+            return int(value) if math.isfinite(value) else default
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+ALERT_COOLDOWN_SECONDS = int(DEFAULT_ALERT_COOLDOWN_HOURS * 3600)
+
+
+def record_success(cfg: AppConfig | None = None) -> None:
     now_iso = time.strftime("%Y-%m-%d %H:%M:%S")
     status = load_status()
+
+    last_status = str(status.get("status") or "HEALTHY")
+    last_notified = _safe_float(status.get("last_error_notified_at"), 0.0)
+    last_error = status.get("last_error")
+    failures = _safe_int(status.get("consecutive_failures"), 0)
+
+    if last_status == "UNHEALTHY" and last_notified > 0 and cfg is not None:
+        title = "🟢 Find-Score 恢复正常"
+        lines = ["教务系统查询已恢复正常。"]
+        if last_error:
+            summary = str(last_error).strip().splitlines()[0][:80]
+            lines.append(f"已恢复异常：{summary}")
+        if failures > 1:
+            lines.append(f"持续异常次数：{failures} 次")
+        text = "\n".join(lines)
+
+        try:
+            bark = cfg["bark"]
+            sent = send_recovery(
+                bark["key"],
+                text,
+                title=title,
+                server=bark["server"],
+                group=bark["group"],
+                sound=bark.get("sound", "bell"),
+            )
+            if sent:
+                log.info("已发送恢复正常通知 (Bark)")
+            else:
+                log.warning("恢复正常通知发送失败 (Bark 接口返回失败)")
+        except (KeyError, TypeError, ValueError, RequestException) as notify_err:
+            log.warning("发送恢复正常通知发生错误: %s", notify_err)
+
     status["status"] = "HEALTHY"
     status["last_success_at"] = now_iso
     status["consecutive_failures"] = 0
     status["last_error"] = None
+    status["last_error_notified_at"] = 0
     save_status(status)
 
 
@@ -204,9 +265,9 @@ def handle_failure(error: Exception, cfg: AppConfig | None = None) -> None:
     now_iso = time.strftime("%Y-%m-%d %H:%M:%S")
     status = load_status()
 
-    last_status = status.get("status", "HEALTHY")
-    last_notified = float(status.get("last_error_notified_at", 0) or 0)
-    failures = int(status.get("consecutive_failures", 0) or 0) + 1
+    last_status = str(status.get("status") or "HEALTHY")
+    last_notified = _safe_float(status.get("last_error_notified_at"), 0.0)
+    failures = _safe_int(status.get("consecutive_failures"), 0) + 1
 
     status["status"] = "UNHEALTHY"
     status["last_error"] = str(error)
@@ -215,10 +276,7 @@ def handle_failure(error: Exception, cfg: AppConfig | None = None) -> None:
 
     cooldown = ALERT_COOLDOWN_SECONDS
     if cfg and "alert_cooldown_hours" in cfg:
-        try:
-            cooldown = float(cfg["alert_cooldown_hours"]) * 3600
-        except (TypeError, ValueError):
-            pass
+        cooldown = _safe_float(cfg["alert_cooldown_hours"], DEFAULT_ALERT_COOLDOWN_HOURS) * 3600
 
     should_notify = (last_status == "HEALTHY") or (now - last_notified >= cooldown)
 
@@ -362,10 +420,12 @@ def main() -> int:
 
     try:
         with instance_lock():
-            if run_once(cfg):
-                record_success()
-                return 0
-            return 1
+            run_once(cfg)
+            record_success(cfg)
+            return 0
+    except LockContentionError as error:
+        log.info("%s，跳过本次执行", error)
+        return 0
     except (ConfigError, OSError, RuntimeError, RequestException, SsoLoginError) as error:
         log.error("%s", error)
         handle_failure(error, cfg)
